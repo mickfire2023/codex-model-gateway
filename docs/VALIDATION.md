@@ -8,7 +8,7 @@ Validated on Windows with Node.js 24.22.1 and Windows PowerShell 5.1. Test data 
 | Fresh installation, preserving upgrade, direct recovery and occupied-port failure | 18 assertions passed |
 | Main scheduled lifecycle, independent process lifetime, recovery, re-enable and failed deployment rollback | Passed; polling-dependent assertion count |
 | Optional bridge lifecycle, readiness, own-task cleanup and child process cleanup | 39 assertions passed |
-| Optional Chrome installer: configuration preservation, metadata integrity, conflict/refusal, failure and preview checks | 62 assertions passed |
+| Optional Chrome installer: configuration preservation, metadata integrity, conflict/refusal, failure and preview checks | 71 assertions passed |
 | PowerShell source parsing | Passed |
 | Tracked/unignored source release audit | Passed |
 
