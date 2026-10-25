@@ -18,7 +18,7 @@ $called=[ordered]@{directory=$Directory;scriptRoot=$PSScriptRoot;showMessage=[bo
 exit 0
 `;
 function fixture(t,{legacy=false,empty=false}={}){
-  const profile=fs.mkdtempSync(path.join(__dirname,'.launcher-中文 space-'));
+  const profile=fs.mkdtempSync(path.join(__dirname,'.launcher-中文 \u{1f9ea} space-'));
   const documents=path.join(profile,'Documents','CodexModelGateway');
   const previous=path.join(profile,'AppData','Local','Packages','OpenAI.Codex_2p2nqsd0c76g0','LocalCache','Local','CodexModelGateway');
   const root=legacy?previous:documents;
@@ -47,10 +47,25 @@ test('output entries find only the exact physical legacy package directory when 
 test('a partial Documents installation does not silently run an older legacy operation',t=>{
   const f=fixture(t,{legacy:true});
   fs.mkdirSync(path.join(f.documents,'private'),{recursive:true});fs.writeFileSync(path.join(f.documents,'private','settings.json'),'{}');
-  const result=f.invoke(cscript,path.join(outputs,'打开模型网关.vbs'));
-  assert.equal(result.status,1);
-  assert.match(result.stderr,/required gateway script.*missing/is);
+  for(const [name]of names){
+    const result=f.invoke(cscript,path.join(outputs,name));
+    assert.equal(result.status,1,result.stderr);
+    assert.match(result.stderr,/required gateway script.*missing/is);
+    assert.doesNotMatch(result.stderr,/[^\x00-\x7f]/);
+    assert.ok(result.stderr.includes('\\uD83E\\uDDEA'));
+  }
   assert.equal(fs.existsSync(path.join(f.previous,'called.json')),false);
+});
+
+test('installed launcher reports an incomplete Unicode installation without losing its failure exit code',t=>{
+  const f=fixture(t),file=path.join(f.root,'launch.vbs');
+  fs.copyFileSync(path.join(source,'launch.vbs'),file);
+  fs.unlinkSync(path.join(f.root,'Open-dashboard.ps1'));
+  const result=f.invoke(cscript,file,['dashboard']);
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/installation is incomplete/i);
+  assert.doesNotMatch(result.stderr,/[^\x00-\x7f]/);
+  assert.ok(result.stderr.includes('\\uD83E\\uDDEA'));
 });
 test('missing installs fail visibly without searching rollback, test, or source directories',t=>{
   const f=fixture(t,{empty:true});
