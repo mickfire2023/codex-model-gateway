@@ -131,15 +131,19 @@ function Get-GeminiBridgeListeners([int]$Port) {
     return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
-function Test-GeminiBridgeListenerOwned($Listener, $Identity) {
-    if ($Listener.LocalAddress -notin @('127.0.0.1','::1')) { return $false }
-    $process = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$Listener.OwningProcess) -ErrorAction SilentlyContinue
-    if (-not $process -or -not [string]::Equals([string]$process.ExecutablePath,$Identity.Binary,[StringComparison]::OrdinalIgnoreCase)) { return $false }
+function Test-GeminiBridgeProcessOwned($Process, $Identity) {
+    if (-not $Process -or -not [string]::Equals([string]$Process.ExecutablePath,$Identity.Binary,[StringComparison]::OrdinalIgnoreCase)) { return $false }
     # No credential values are passed on the command line; inspect only the config path.
-    $match = [regex]::Match([string]$process.CommandLine, '(?:^|\s)-config(?:=|\s+)(?:"([^"]+)"|(\S+))')
+    $match = [regex]::Match([string]$Process.CommandLine, '(?:^|\s)-config(?:=|\s+)(?:"([^"]+)"|(\S+))')
     if (-not $match.Success) { return $false }
     $config = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
     return [string]::Equals($config,(Join-Path $Identity.Root 'config.yaml'),[StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-GeminiBridgeListenerOwned($Listener, $Identity) {
+    if ($Listener.LocalAddress -notin @('127.0.0.1','::1')) { return $false }
+    $process = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$Listener.OwningProcess) -ErrorAction SilentlyContinue
+    return (Test-GeminiBridgeProcessOwned $process $Identity)
 }
 
 function Get-GeminiBridgeStatus([string]$Directory, [int]$Port=8317) {
@@ -152,6 +156,9 @@ function Get-GeminiBridgeStatus([string]$Directory, [int]$Port=8317) {
         if (Test-GeminiBridgeListenerOwned $listener $identity) { $owned += $listener } else { $foreign += $listener }
     }
     $names = @{0='unknown';1='disabled';2='queued';3='ready';4='running'}
+    # Readiness can be checked against a mistaken port; process lifetime must
+    # still be tracked by exact executable/config ownership, independently.
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'cli-proxy-api.exe'" -ErrorAction SilentlyContinue | Where-Object { Test-GeminiBridgeProcessOwned $_ $identity })
     return [pscustomobject]@{
         Directory=$identity.Root; Port=$Port; TaskName=$identity.Name
         TaskExists=[bool]$task; TaskState=$(if($task){$names[[int]$task.State]}else{'missing'})
@@ -159,6 +166,7 @@ function Get-GeminiBridgeStatus([string]$Directory, [int]$Port=8317) {
         TaskActive=(Test-GeminiBridgeTaskActive $task)
         Listening=($owned.Count -gt 0); ForeignListener=($foreign.Count -gt 0)
         ProcessIds=@($owned | ForEach-Object { [int]$_.OwningProcess } | Select-Object -Unique)
+        OwnedProcessIds=@($processes | ForEach-Object { [int]$_.ProcessId })
     }
 }
 
@@ -166,7 +174,7 @@ function Start-GeminiBridge([string]$Directory, [int]$Port=8317, [int]$WaitSecon
     $identity = Get-GeminiBridgeIdentity $Directory
     $state = Get-GeminiBridgeStatus $Directory $Port
     if ($state.ForeignListener) { throw 'The bridge port is occupied by another process or a non-loopback listener; it was left untouched.' }
-    if ($state.Listening -and -not $state.TaskActive) { throw 'The bridge is running outside its managed task; it was left untouched.' }
+    if (($state.Listening -or @($state.OwnedProcessIds).Count -gt 0) -and -not $state.TaskActive) { throw 'The bridge is running outside its managed task; it was left untouched.' }
     $task = Register-GeminiBridgeTask $Directory
     $task.Enabled = $true
     $startedHere = -not (Test-GeminiBridgeTaskActive $task)
@@ -200,7 +208,7 @@ function Stop-GeminiBridge([string]$Directory, [int]$Port=8317, [switch]$RemoveT
     do {
         Start-Sleep -Milliseconds 150
         $state = Get-GeminiBridgeStatus $Directory $Port
-        if (-not $state.TaskActive -and -not $state.Listening) { $settled++ } else { $settled=0 }
+        if (-not $state.TaskActive -and -not $state.Listening -and @($state.OwnedProcessIds).Count -eq 0) { $settled++ } else { $settled=0 }
         if ($settled -ge 3) {
             if ($RemoveTask) {
                 $task = Find-GeminiBridgeTask $connection $identity
