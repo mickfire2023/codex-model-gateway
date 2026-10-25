@@ -41,3 +41,47 @@ test('a failure after streaming begins is a response.failed event with the exist
 test('custom catalog instructions are provider-neutral and independent of DeepSeek metadata',async t=>{
   const f=await fixture(t);await f.gateway.providers.saveProvider({id:'synthetic-custom-provider',name:'Synthetic custom',baseUrl:'https://synthetic.invalid/v1',protocol:'responses',apiKey:'synthetic-custom-key',models:[{id:'synthetic-custom',displayName:'Synthetic custom',contextWindow:16000,maxOutputTokens:200,supportsTools:true,inputModalities:['text'],reasoningEfforts:['none']}]});const model=f.gateway.providers.catalogModels()[0];assert.match(model.base_instructions,/helpful coding assistant/);assert.equal(model.model_messages.instructions_template,model.base_instructions);assert.doesNotMatch(model.base_instructions,/foreign provider instructions/);
 });
+
+test('DeepSeek catalog exposes MCP tools directly across refresh without changing source metadata or GPT capabilities',async t=>{
+  const root=fs.mkdtempSync(path.join(__dirname,'.native-contract-fixture-'));
+  const metadata=slug=>({slug,display_name:slug,visibility:'list',minimal_client_version:'0.144.0',context_window:32000,input_modalities:['text','image'],supports_tools:true,supports_tool_calls:true,supports_search_tool:true,supported_reasoning_levels:[{effort:'high',description:'Synthetic high'}],default_reasoning_level:'high',apply_patch_tool_type:'function',supports_parallel_tool_calls:true,prefer_websockets:false,base_instructions:'Synthetic catalog instructions'});
+  const state={gpt:{models:[metadata('gpt-synthetic-native')]},deepseek:{models:[metadata(model)]}};
+  const sourceBefore=structuredClone(state);
+  for(const [name,value] of [['openai-models.json',state.gpt],['deepseek-models.json',state.deepseek]])fs.writeFileSync(path.join(root,name),JSON.stringify(value));
+  const rawBefore=fs.readFileSync(path.join(root,'deepseek-models.json'),'utf8');
+  const upstream=http.createServer((req,res)=>{
+    if(req.url.startsWith('/gpt/models')){res.writeHead(200,{'content-type':'application/json'});return res.end(JSON.stringify(state.gpt));}
+    if(req.url==='/ds/models'){res.writeHead(200,{'content-type':'application/json'});return res.end(JSON.stringify({object:'list',data:state.deepseek.models.map(item=>({id:item.slug}))}));}
+    if(req.url==='/docs/codex'){const escaped=JSON.stringify(state.deepseek).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');res.writeHead(200,{'content-type':'text/html'});return res.end('<pre>'+escaped+'</pre>');}
+    res.writeHead(404);res.end();
+  });
+  let gateway;
+  t.after(async()=>{
+    if(gateway){gateway.socketRouter.close();gateway.server.closeAllConnections();if(gateway.server.listening)await new Promise(resolve=>gateway.server.close(resolve));}
+    upstream.closeAllConnections();if(upstream.listening)await new Promise(resolve=>upstream.close(resolve));
+    assert.ok(path.resolve(root).startsWith(path.resolve(__dirname)+path.sep));fs.rmSync(root,{recursive:true,force:true});
+  });
+  upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
+  const sourceBase='http://127.0.0.1:'+upstream.address().port;
+  gateway=createGateway({directory:root,routeToken:token,catalogSyncEnabled:true,catalogRefreshIntervalMs:3600000},{deepseekKey:'sk-synthetic-native-catalog-key',gptBase:sourceBase+'/gpt',deepseekBase:sourceBase+'/ds',deepseekDocsUrl:sourceBase+'/docs/codex',getCatalogCredentials:()=>({chatgptHeaders:{authorization:'Bearer synthetic-native-catalog-token'},deepseekKey:'sk-synthetic-native-catalog-key',clientVersion:'0.164.0',accountId:'synthetic-native-catalog-account'})});
+  function checkCatalog(catalog,contextWindow){
+    const ds=catalog.models.find(item=>item.slug===model),gpt=catalog.models.find(item=>item.slug==='gpt-synthetic-native');
+    assert.equal(ds.supports_search_tool,false);assert.equal(gpt.supports_search_tool,true);
+    assert.deepEqual(ds.input_modalities,['text','image']);assert.deepEqual(gpt.input_modalities,['text','image']);
+    assert.equal(ds.supports_tools,true);assert.equal(ds.supports_tool_calls,true);assert.equal(ds.context_window,contextWindow);
+  }
+  checkCatalog(gateway.catalog(),32000);
+  assert.deepEqual(state,sourceBefore);assert.equal(fs.readFileSync(path.join(root,'deepseek-models.json'),'utf8'),rawBefore);
+  gateway.server.listen(0,'127.0.0.1');await once(gateway.server,'listening');await gateway.updater.refresh({force:true});
+  state.deepseek.models[0].context_window=48000;
+  state.gpt.models[0].description='Synthetic refreshed official metadata';
+  const refreshedSource=structuredClone(state);
+  await gateway.updater.refresh({force:true});
+  checkCatalog(gateway.catalog(),48000);
+  checkCatalog(JSON.parse(fs.readFileSync(path.join(root,'combined-models.json'),'utf8')),48000);
+  assert.deepEqual(state,refreshedSource);
+  const cachedDeepseek=JSON.parse(fs.readFileSync(path.join(root,'deepseek-models.json'),'utf8'));
+  assert.equal(cachedDeepseek.models[0].supports_search_tool,true);assert.equal(cachedDeepseek.models[0].context_window,48000);assert.deepEqual(cachedDeepseek.models[0].input_modalities,['text','image']);
+  const response=await fetch('http://127.0.0.1:'+gateway.server.address().port+'/'+token+'/backend-api/codex/models',{headers:{authorization:'Bearer synthetic-native-catalog-client'},signal:AbortSignal.timeout(3000)});
+  assert.equal(response.status,200);checkCatalog(await response.json(),48000);
+});

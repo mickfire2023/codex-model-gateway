@@ -230,3 +230,110 @@ test('both length and content filter omit partial tools and mark visible message
     assertSequences(result.events);
   }
 });
+
+function browserCall(id) {
+  return {type: 'function_call', name: 'take_screenshot', namespace: 'synthetic_browser', call_id: id, arguments: '{}'};
+}
+function browserRequest(input) {
+  return {model: 'synthetic-model', input, tools: [{type: 'function', name: 'take_screenshot', namespace: 'synthetic_browser', parameters: {type: 'object', properties: {}}}]};
+}
+function assertCompleteToolBatches(messages) {
+  const pending = new Set();
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      assert(pending.delete(message.tool_call_id), 'each tool result must match an outstanding assistant call');
+      assert(typeof message.content === 'string' || message.content.every(part => part.type === 'text'), 'Chat tool messages permit text only');
+    } else {
+      assert.equal(pending.size, 0, 'all parallel tool results must precede any image observation or next message');
+      for (const call of message.tool_calls || []) pending.add(call.id);
+    }
+  }
+  assert.equal(pending.size, 0);
+}
+
+test('mixed browser screenshot results retain tool text and attach lossless images as attributed user observations', () => {
+  const id = 'synthetic-screenshot-call';
+  const image = 'data:image/png;base64,c3ludGhldGlj';
+  const remote = 'https://images.synthetic.invalid/shot.png?variant=%2B+%2F#synthetic';
+  const request = browserRequest([textMessage('user', 'Inspect the synthetic page'), browserCall(id),
+    {type: 'function_call_output', call_id: id, output: [
+      {type: 'input_text', text: 'Synthetic page heading: 测试 🧪'},
+      {type: 'input_image', image_url: image, detail: 'low'},
+      {type: 'input_text', text: 'Synthetic capture complete'},
+      {type: 'input_image', image_url: remote, detail: 'high'}
+    ]}]);
+  const before = structuredClone(request);
+  const {payload} = prepareChatRequest(request);
+  assertCompleteToolBatches(payload.messages);
+  const output = payload.messages.find(message => message.role === 'tool');
+  assert.equal(output.tool_call_id, id);
+  assert.match(output.content, /Synthetic page heading: 测试 🧪/);
+  assert.match(output.content, /Synthetic capture complete/);
+  const observation = payload.messages.at(-1);
+  assert.equal(observation.role, 'user');
+  assert(observation.content.some(part => part.type === 'text' && part.text.includes(id)));
+  assert.deepEqual(observation.content.filter(part => part.type === 'image_url').map(part => part.image_url), [
+    {url: image, detail: 'low'}, {url: remote, detail: 'high'}
+  ]);
+  assert.deepEqual(request, before);
+});
+
+test('image-only browser result has an explicit tool placeholder and exactly one attributed image', () => {
+  const id = 'synthetic-image-only';
+  const image = 'data:image/png;base64,c3ludGhldGlj';
+  const {payload} = prepareChatRequest(browserRequest([browserCall(id),
+    {type: 'function_call_output', call_id: id, output: [{type: 'input_image', image_url: image}]}]));
+  assertCompleteToolBatches(payload.messages);
+  const output = payload.messages.find(message => message.role === 'tool');
+  assert.equal(typeof output.content, 'string');
+  assert.match(output.content, /image/i); assert(output.content.includes(id));
+  const observation = payload.messages.at(-1);
+  assert.equal(observation.role, 'user');
+  assert(observation.content.some(part => part.type === 'text' && part.text.includes(id)));
+  assert.equal(observation.content.filter(part => part.type === 'image_url').length, 1);
+  assert.equal(observation.content.find(part => part.type === 'image_url').image_url.url, image);
+});
+
+test('parallel browser screenshot outputs stay consecutive before their associated image observations', () => {
+  const first = 'synthetic-parallel-first', second = 'synthetic-parallel-second';
+  const images = ['data:image/png;base64,c3ludGhldGljLWZpcnN0', 'data:image/png;base64,c3ludGhldGljLXNlY29uZA=='];
+  const {payload} = prepareChatRequest(browserRequest([browserCall(first), browserCall(second),
+    {type: 'function_call_output', call_id: first, output: [{type: 'input_image', image_url: images[0]}]},
+    {type: 'reasoning', content: [{type: 'reasoning_text', text: 'Synthetic ignored history'}]},
+    {type: 'function_call_output', call_id: second, output: [{type: 'input_image', image_url: images[1]}]}]));
+  assertCompleteToolBatches(payload.messages);
+  assert.deepEqual(payload.messages.map(message => message.role), ['assistant', 'tool', 'tool', 'user']);
+  assert.deepEqual(payload.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), [first, second]);
+  const observation = payload.messages.at(-1).content;
+  const imageIndexes = observation.flatMap((part, index) => part.type === 'image_url' ? [index] : []);
+  assert.equal(imageIndexes.length, 2);
+  for (const [index, callId, image] of [[imageIndexes[0], first, images[0]], [imageIndexes[1], second, images[1]]]) {
+    assert.equal(observation[index - 1].type, 'text');
+    assert(observation[index - 1].text.includes(callId));
+    assert.equal(observation[index].image_url.url, image);
+  }
+});
+
+test('image observations follow the whole tool batch and precede a later real user message without changing plain tool output', () => {
+  const first = 'synthetic-image-result', second = 'synthetic-text-result';
+  const {payload} = prepareChatRequest(browserRequest([textMessage('user', 'Inspect'), browserCall(first), browserCall(second),
+    {type: 'function_call_output', call_id: first, output: [{type: 'input_image', image_url: 'data:image/png;base64,c3ludGhldGlj'}]},
+    {type: 'function_call_output', call_id: second, output: 'Unchanged plain tool result 🧪'},
+    textMessage('user', 'Now continue with my next request.')]));
+  assertCompleteToolBatches(payload.messages);
+  assert.deepEqual(payload.messages.map(message => message.role), ['user', 'assistant', 'tool', 'tool', 'user', 'user']);
+  assert.equal(payload.messages[3].content, 'Unchanged plain tool result 🧪');
+  assert(payload.messages[4].content.some(part => part.type === 'image_url'));
+  assert.equal(payload.messages[5].content, 'Now continue with my next request.');
+});
+
+test('mixed screenshot results containing a file attachment still fail explicitly without mutating the caller', () => {
+  const request = browserRequest([browserCall('synthetic-file-result'),
+    {type: 'function_call_output', call_id: 'synthetic-file-result', output: [
+      {type: 'input_image', image_url: 'data:image/png;base64,c3ludGhldGlj'},
+      {type: 'input_file', file_id: 'synthetic-file-id'}
+    ]}]);
+  const before = structuredClone(request);
+  assert.throws(() => prepareChatRequest(request), error => error.code === 'unsupported_attachment');
+  assert.deepEqual(request, before);
+});
