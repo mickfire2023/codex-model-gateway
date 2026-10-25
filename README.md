@@ -1,6 +1,6 @@
 # Codex Model Gateway
 
-[English](docs/README.en.md) · [安装与恢复](docs/INSTALL.md) · [Gemini 可选组件](docs/GEMINI.md)
+[English](docs/README.en.md) · [安装与恢复](docs/INSTALL.md) · [Chrome 接入](docs/CHROME.md) · [Gemini 可选组件](docs/GEMINI.md)
 
 一个运行在 Windows 本机的 Codex 模型网关。在保留原有 ChatGPT 登录与 GPT 模型的同时，将 DeepSeek 和其他 OpenAI 兼容 API 加入同一个模型选择器。
 
@@ -15,6 +15,7 @@
 - GPT / DeepSeek 每 30 分钟检查目录；失败时保留已知列表。模型是否可用取决于账号、客户端版本和上游兼容性。
 - 当前用户的 Windows 计划任务负责后台运行，不依赖 Codex 进程存活；无需管理员权限或 Windows 密码。
 - 可选 Gemini 第三方订阅适配及工具兼容性验证后的自动发现，默认不安装。
+- 可选微软官方 Playwright MCP Chrome 接入：纯文本模型通过页面元素操作，视觉模型可单独启用截图；使用独立 Chrome 状态，保留原浏览器插件和登录。
 
 ## 快速开始
 

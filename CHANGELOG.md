@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.0
+
+- Add optional isolated Chrome connections through the pinned official Microsoft Playwright MCP: text-only accessibility tools by default, plus a separately enabled screenshot-capable connection. Preserve existing models, authentication, plugins and normal approval settings.
+- Fix DeepSeek MCP tool discovery by advertising direct tool exposure instead of unsupported client-side `tool_search`. Preserve upstream source metadata and GPT capabilities, including after catalog refresh.
+- Fix Chat Completions screenshot tool results: retain textual tool messages and call IDs, then attach image observations after the complete tool-result batch in standard user multimodal messages.
+- Add reproducible, explicitly enabled native-client Chrome validation with exact-origin synthetic-page guards, real page-event checks and screenshot-only random visual challenges. Public CI remains credential-free and does not run model/browser integration checks.
+- Validate all 14 installed selectable model IDs through isolated Chrome: 13 completed DOM and visual checks; the text-only model completed DOM and screenshot capture without receiving image data.
+
 ## 2.4.1
 
 - Fix Gemini failures with the real Codex client: use provider-neutral custom-model instructions instead of inheriting DeepSeek instructions. Migrate only exact legacy instruction matches for the Gemini subscription adapter; retain user/developer instructions and the full tool list.
