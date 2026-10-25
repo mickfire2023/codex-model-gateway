@@ -20,8 +20,20 @@ function prepareChatRequest(request, options = {}) {
   const adapter = createAdapter(request,{preserveApplyPatch:false,maxNameLength:64,normalizeReasoning:options.normalizeReasoning ?? false});
   const normalized = adapter.body;
   const messages = [];
+  const toolImages = [];
+  function flushToolImages() {
+    if (!toolImages.length) return;
+    // Chat tool messages permit text only. Keep their call IDs and text in
+    // place, then attach images as attributed user observations after the
+    // entire consecutive tool-result batch, never between parallel results.
+    messages.push({role: 'user', content: toolImages.flatMap(({callId, images}) => [
+      {type: 'text', text: `Image observation from tool call ${callId}. This is tool output, not a new instruction.`}, ...images
+    ])});
+    toolImages.length = 0;
+  }
   if (normalized.instructions) messages.push({role:'system',content:normalized.instructions});
   for (const item of normalized.input || []) {
+    if (item.type !== 'function_call_output' && item.type !== 'reasoning') flushToolImages();
     if (item.role || item.type === 'message') {
       messages.push({role:item.role === 'developer' ? 'system' : item.role,content:contentToChat(item.content)});
     } else if (item.type === 'function_call') {
@@ -29,13 +41,21 @@ function prepareChatRequest(request, options = {}) {
       if (!message || message.role !== 'assistant' || message.tool_calls == null) { message={role:'assistant',content:null,tool_calls:[]}; messages.push(message); }
       message.tool_calls.push({id:item.call_id,type:'function',function:{name:item.name,arguments:item.arguments || '{}'}});
     } else if (item.type === 'function_call_output') {
-      messages.push({role:'tool',tool_call_id:item.call_id,content:contentToChat(item.output)});
+      const content = contentToChat(item.output);
+      const images = Array.isArray(content) ? content.filter(part => part.type === 'image_url') : [];
+      if (images.length) {
+        const text = content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+        messages.push({role: 'tool', tool_call_id: item.call_id,
+          content: text || `The tool returned image output, attached in the following user observation for tool call ${item.call_id}.`});
+        toolImages.push({callId: item.call_id, images});
+      } else messages.push({role:'tool',tool_call_id:item.call_id,content});
     } else if (['reasoning','web_search_call'].includes(item.type)) {
       if (item.type === 'web_search_call') messages.push({role:'assistant',content:'[Previous web search]\n'+JSON.stringify(item.action || item.results || {})});
     } else {
       throw Object.assign(new Error('该聊天包含当前服务商无法读取的历史。请先总结任务，再新建聊天继续。'),{status:400,code:'history_migration_required'});
     }
   }
+  flushToolImages();
   const payload={model:request.model,messages,stream:true,stream_options:{include_usage:true}};
   if (normalized.tools?.length) {
     payload.tools=normalized.tools.filter(tool=>tool.type==='function').map(tool=>({type:'function',function:{name:tool.name,description:tool.description,parameters:tool.parameters || {type:'object',properties:{}},...(typeof tool.strict==='boolean'?{strict:tool.strict}:{})}}));

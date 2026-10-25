@@ -129,7 +129,10 @@ function createGateway(settings, options = {}) {
     return safe;
   }
   function mergeCatalog(upstream) {
-    return {models:[...(upstream.models || []).filter(model=>!deepseekIds.has(model.slug)),...dsCatalog.models.map((model,index)=>({...model,priority:100+index,service_tiers:[],additional_speed_tiers:[],default_service_tier:null,available_access_programs:{cyber:['standard']}})),...providers.catalogModels()]};
+    // This adapter exposes ordinary MCP functions, not Codex's client-executed
+    // tool_search protocol. Keep their schemas directly visible to the model;
+    // otherwise Codex defers them behind a discovery tool we cannot forward.
+    return {models:[...(upstream.models || []).filter(model=>!deepseekIds.has(model.slug)),...dsCatalog.models.map((model,index)=>({...model,supports_search_tool:false,priority:100+index,service_tiers:[],additional_speed_tiers:[],default_service_tier:null,available_access_programs:{cyber:['standard']}})),...providers.catalogModels()]};
   }
   let catalog=mergeCatalog(original);
   function writeCatalog() {
@@ -279,9 +282,9 @@ function createGateway(settings, options = {}) {
     try {
       url=new URL(req.url,'http://127.0.0.1');
       if(!allowed(req))return json(res,403,{error:{message:'Local gateway access denied'}});
-      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.4.1',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
+      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.5.0',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
       if(!url.pathname.startsWith(root+'/'))return json(res,404,{error:{message:'Not found'}});
-      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.4.1',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
+      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.5.0',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
       if(req.method==='GET'&&url.pathname===root+'/')return page(res);
       if(req.method==='POST'&&url.pathname.startsWith(root+'/settings/')) {
         const action=url.pathname.slice((root+'/settings/').length);
