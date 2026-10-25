@@ -58,9 +58,10 @@ foreach ($which in @('version','repository','integrity','tarball')) {
     Assert-ChromeFixtureThrows { Assert-ChromeBridgeMetadata $bad } ('Unexpected '+$which+' was accepted.')
 }
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('codex-chrome-install-'+[Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $fixture | Out-Null
-Protect-ChromeBridgePath $fixture -Directory
+New-ChromeBridgeDirectory $fixture
 $fixtureSid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+Assert-ChromeFixture (Test-ChromeBridgePrivateAccess (New-ChromeBridgeCreationSecurity $true) $fixtureSid $true) 'New directory security does not explicitly specify the current token user and protected full-control DACL.'
+Assert-ChromeFixture (Test-ChromeBridgePrivateAccess (New-ChromeBridgeCreationSecurity $false) $fixtureSid $false) 'New file security does not explicitly specify the current token user and protected full-control DACL.'
 $protectedDirectory=New-Object IO.DirectoryInfo($fixture)
 $directoryBefore=Get-ChromeBridgeAccessControl $protectedDirectory
 $directorySecurityHash=Get-ChromeBridgeHash $directoryBefore.GetSecurityDescriptorBinaryForm()
@@ -68,7 +69,13 @@ Protect-ChromeBridgePath $fixture -Directory
 $directoryAfter=Get-ChromeBridgeAccessControl $protectedDirectory
 Assert-ChromeFixture (Test-ChromeBridgePrivateAccess $directoryAfter $fixtureSid $true) 'Repeated protection weakened the current-user-only directory access.'
 Assert-ChromeFixture ((Get-ChromeBridgeHash $directoryAfter.GetSecurityDescriptorBinaryForm()) -ceq $directorySecurityHash) 'Repeated directory protection unnecessarily changed its existing owner or DACL.'
+New-ChromeBridgeDirectory $fixture
+Assert-ChromeFixture ((Get-ChromeBridgeHash (Get-ChromeBridgeAccessControl $protectedDirectory).GetSecurityDescriptorBinaryForm()) -ceq $directorySecurityHash) 'Creating an already protected directory changed its ownership or permissions.'
 $protectedFile=Join-Path $fixture 'synthetic-protected-file.txt'
+$createdFile=New-ChromeBridgePrivateFile $protectedFile
+$createdFile.Dispose()
+$createdFileAcl=Get-ChromeBridgeAccessControl (New-Object IO.FileInfo($protectedFile))
+Assert-ChromeFixture (Test-ChromeBridgePrivateAccess $createdFileAcl $fixtureSid $false) 'A private file was not owned and protected at creation time.'
 [IO.File]::WriteAllText($protectedFile,'Synthetic protected fixture.',$utf8)
 Protect-ChromeBridgePath $protectedFile
 $fileInfo=New-Object IO.FileInfo($protectedFile)
@@ -78,8 +85,28 @@ Protect-ChromeBridgePath $protectedFile
 $fileAfter=Get-ChromeBridgeAccessControl $fileInfo
 Assert-ChromeFixture (Test-ChromeBridgePrivateAccess $fileAfter $fixtureSid $false) 'Repeated protection weakened the current-user-only file access.'
 Assert-ChromeFixture ((Get-ChromeBridgeHash $fileAfter.GetSecurityDescriptorBinaryForm()) -ceq $fileSecurityHash) 'Repeated file protection unnecessarily changed its existing owner or DACL.'
+$fileContentHash=Get-ChromeBridgeHash ([IO.File]::ReadAllBytes($protectedFile))
+Assert-ChromeFixtureThrows { $unexpected=New-ChromeBridgePrivateFile $protectedFile; $unexpected.Dispose() } 'Private file creation overwrote an existing file.'
+Assert-ChromeFixture ((Get-ChromeBridgeHash ([IO.File]::ReadAllBytes($protectedFile))) -ceq $fileContentHash) 'Rejected private file creation changed existing content.'
+Assert-ChromeFixture ((Get-ChromeBridgeHash (Get-ChromeBridgeAccessControl $fileInfo).GetSecurityDescriptorBinaryForm()) -ceq $fileSecurityHash) 'Rejected private file creation changed existing ownership or permissions.'
+$defaultOwnerProbe=Join-Path $fixture 'synthetic-default-owner-probe'
+# Deliberately use the OS default only for this empty fixture. Elevated Windows
+# CI may assign Administrators as Owner; an existing such path must be refused.
+[IO.Directory]::CreateDirectory($defaultOwnerProbe) | Out-Null
+$probeInfo=New-Object IO.DirectoryInfo($defaultOwnerProbe)
+$probeBefore=Get-ChromeBridgeAccessControl $probeInfo
+if (-not $probeBefore.GetOwner([Security.Principal.SecurityIdentifier]).Equals($fixtureSid)) {
+    $probeHash=Get-ChromeBridgeHash $probeBefore.GetSecurityDescriptorBinaryForm()
+    Assert-ChromeFixtureThrows { New-ChromeBridgeDirectory $defaultOwnerProbe } 'An existing path with another default Owner was taken over.'
+    Assert-ChromeFixture ((Get-ChromeBridgeHash (Get-ChromeBridgeAccessControl $probeInfo).GetSecurityDescriptorBinaryForm()) -ceq $probeHash) 'Refusing another default Owner changed that path security.'
+} else {
+    New-ChromeBridgeDirectory $defaultOwnerProbe
+    $probeAfter=Get-ChromeBridgeAccessControl $probeInfo
+    Assert-ChromeFixture ($probeAfter.GetOwner([Security.Principal.SecurityIdentifier]).Equals($fixtureSid)) 'Protecting an existing user-owned path changed its Owner.'
+    Assert-ChromeFixture (Test-ChromeBridgePrivateAccess $probeAfter $fixtureSid $true) 'An existing user-owned path did not keep private protection.'
+}
 $private=Join-Path $fixture 'private'
-New-Item -ItemType Directory -Path $private | Out-Null
+New-ChromeBridgeDirectory $private
 $config=Join-Path $fixture 'synthetic-config.toml'
 $original=$utf8.GetBytes('model = "gpt-synthetic"'+"`n"+'[plugins.synthetic]'+"`n"+'enabled = true'+"`n")
 [IO.File]::WriteAllBytes($config,$original)
@@ -129,7 +156,8 @@ Assert-ChromeFixtureThrows { Merge-ChromeBridgeConfig $utf8.GetBytes($previous+"
 $marker=Join-Path $fixture 'bridge-install.json'
 [IO.File]::WriteAllText($marker,($owned | ConvertTo-Json),$utf8)
 $markerBefore=Get-ChromeBridgeHash ([IO.File]::ReadAllBytes($marker))
-New-Item -ItemType Directory -Path $owned.runtimeRoot -Force | Out-Null
+New-ChromeBridgeDirectory (Split-Path -Parent $owned.runtimeRoot)
+New-ChromeBridgeDirectory $owned.runtimeRoot
 $sentinel=Join-Path $owned.runtimeRoot 'synthetic-current-runtime.txt'
 [IO.File]::WriteAllText($sentinel,'Preserve the previous running runtime.',$utf8)
 $sentinelBefore=Get-ChromeBridgeHash ([IO.File]::ReadAllBytes($sentinel))
