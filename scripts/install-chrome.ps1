@@ -79,6 +79,48 @@ function Protect-ChromeBridgePath([string]$Path,[switch]$Directory) {
     }
 }
 
+function New-ChromeBridgeCreationSecurity([bool]$Directory) {
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($Directory) {
+        $acl=New-Object Security.AccessControl.DirectorySecurity
+        $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+    } else {
+        $acl=New-Object Security.AccessControl.FileSecurity
+        $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')
+    }
+    # This security descriptor is used only when creating a new object. An
+    # elevated token's default Owner may be Administrators rather than its User.
+    # Specify the valid token-user Owner up front, with no SACL or privileges.
+    $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule($rule)
+    return $acl
+}
+
+function New-ChromeBridgeDirectory([string]$Path) {
+    $full=[IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $full) {
+        if (-not (Test-Path -LiteralPath $full -PathType Container)) { throw 'A component directory path is already occupied by a file.' }
+        # Existing objects are never assigned a new Owner.
+        Protect-ChromeBridgePath $full -Directory
+        return
+    }
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $full) -PathType Container)) { throw 'The component directory parent must already exist.' }
+    $security=New-ChromeBridgeCreationSecurity $true
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { [IO.Directory]::CreateDirectory($full,$security) | Out-Null }
+    else { [IO.FileSystemAclExtensions]::Create((New-Object IO.DirectoryInfo($full)),$security) }
+    Protect-ChromeBridgePath $full -Directory
+}
+
+function New-ChromeBridgePrivateFile([string]$Path) {
+    $full=[IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $full) -PathType Container)) { throw 'The component file parent must already exist.' }
+    $security=New-ChromeBridgeCreationSecurity $false
+    # CreateNew is atomic: an existing file is never overwritten or re-owned.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return [IO.FileStream]::new($full,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$security)
+    }
+    return [IO.FileSystemAclExtensions]::Create((New-Object IO.FileInfo($full)),[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]::None,4096,[IO.FileOptions]::None,$security)
+}
+
 function Assert-ChromeBridgeMetadata([object]$Metadata) {
     if ($Metadata.name -cne '@playwright/mcp' -or $Metadata.version -cne $script:ChromeBridgeVersion -or
         $Metadata.repository.url -cne $script:ChromeBridgeRepository -or
@@ -170,7 +212,7 @@ function Write-ChromeBridgeConfig([string]$Path,[byte[]]$Original,[byte[]]$Next,
     [IO.File]::WriteAllBytes($backup,$Original)
     $temporary=$Path+'.chrome-bridge-'+[Guid]::NewGuid().ToString('N')+'.tmp'
     try {
-        $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        $stream=New-ChromeBridgePrivateFile $temporary
         $stream.Dispose()
         Protect-ChromeBridgePath $temporary
         [IO.File]::WriteAllBytes($temporary,$Next)
@@ -262,8 +304,7 @@ function Install-ChromeBridgeRuntime([string]$Directory,[string]$Node,[string]$N
     }
     $private=Join-Path $Directory 'private'
     $stage=Assert-ChromeBridgeWithin (Join-Path $private ('preparing-'+[Guid]::NewGuid().ToString('N'))) $Directory
-    New-Item -ItemType Directory -Path $stage | Out-Null
-    Protect-ChromeBridgePath $stage -Directory
+    New-ChromeBridgeDirectory $stage
     $utf8=New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText((Join-Path $stage 'verified-source.json'),(@{name=$Metadata.name;version=$Metadata.version;repository=$Metadata.repository.url;integrity=$Metadata.dist.integrity;tarball=$Metadata.dist.tarball;verifiedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json),$utf8)
     [IO.File]::WriteAllText((Join-Path $stage 'package.json'),(@{name='codex-chrome-bridge';version='1.0.0';private=$true;dependencies=@{'@playwright/mcp'=$script:ChromeBridgeVersion}} | ConvertTo-Json -Depth 4),$utf8)
@@ -284,7 +325,7 @@ function Install-ChromeBridgeRuntime([string]$Directory,[string]$Node,[string]$N
     }
     Copy-Item -LiteralPath $Node -Destination (Join-Path $stage 'node.exe')
     Assert-ChromeBridgeRuntime $stage
-    New-Item -ItemType Directory -Path (Split-Path -Parent $root) -Force | Out-Null
+    New-ChromeBridgeDirectory (Split-Path -Parent $root)
     # Both absolute paths have been checked inside the explicitly chosen root.
     Assert-ChromeBridgeWithin $stage $Directory | Out-Null
     Assert-ChromeBridgeWithin $root $Directory | Out-Null
@@ -350,11 +391,9 @@ $next=Merge-ChromeBridgeConfig $original $blocks $previousBlocks
 if (-not $PSCmdlet.ShouldProcess($InstallDirectory,'Install the pinned optional Chrome tools and append only the reviewed Codex MCP server entries')) { return }
 $metadata=Invoke-RestMethod -Uri ('https://registry.npmjs.org/@playwright%2fmcp/'+$script:ChromeBridgeVersion) -TimeoutSec 30
 Assert-ChromeBridgeMetadata $metadata
-New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
-Protect-ChromeBridgePath $InstallDirectory -Directory
+New-ChromeBridgeDirectory $InstallDirectory
 $private=Join-Path $InstallDirectory 'private'
-New-Item -ItemType Directory -Path $private -Force | Out-Null
-Protect-ChromeBridgePath $private -Directory
+New-ChromeBridgeDirectory $private
 $utf8=New-Object Text.UTF8Encoding($false)
 $installationId=if ($owned) { [string]$owned.installationId } else { [Guid]::NewGuid().ToString('N') }
 if (-not $owned) {
