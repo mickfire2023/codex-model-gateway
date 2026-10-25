@@ -4,7 +4,7 @@ Validated on Windows with Node.js 24.22.1 and Windows PowerShell 5.1. Test data 
 
 | Suite | Result |
 | --- | --- |
-| Node protocol, routing, storage, catalog, management and distribution checks | 236 passed, 0 failed |
+| Node protocol, routing, storage, catalog, management and distribution checks | 237 passed, 0 failed |
 | Fresh installation, preserving upgrade, direct recovery and occupied-port failure | 18 assertions passed |
 | Main scheduled lifecycle, independent process lifetime, recovery, re-enable and failed deployment rollback | 91 assertions passed |
 | Optional bridge lifecycle, readiness, own-task cleanup and child process cleanup | 38 assertions passed |
@@ -14,5 +14,7 @@ Validated on Windows with Node.js 24.22.1 and Windows PowerShell 5.1. Test data 
 The first-install test uses a separate configuration file, account cache, install directory and ephemeral port. It verifies that the default model, unrelated plugin settings and synthetic auth file are preserved, that an upgrade retains its existing token and private state, and that an occupied-port failure does not alter the connection. Cleanup failures fail the test rather than silently leaving tasks behind.
 
 The main lifecycle test exercises a deliberately unhealthy stable deployment after staging succeeds, then checks rollback and removal of only the test-owned task. It also verifies that independently scheduled control and gateway processes survive the initiating process exit.
+
+The first clean English Windows runner exposed a console-encoding failure: WSH could not write a Unicode path to its redirected legacy-code-page error stream, so a missing launcher reported exit code zero. The issue was reproduced locally using a supplementary Unicode character in the synthetic installation path. Console diagnostics now escape non-ASCII characters while message boxes retain Unicode; reporting failures cannot bypass the explicit error exit. The regression covers all three external launchers and the installed shared launcher.
 
 No provider credentials are needed for the published test suite; it does not generate paid model responses. Actual provider availability depends on the user's account. These checks cover component lifecycle; a complete Windows reboot and every Codex distribution are not covered by this release's automated checks. GitHub Actions reruns the public source suite on a clean Windows runner.
