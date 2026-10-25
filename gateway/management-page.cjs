@@ -97,6 +97,7 @@ function renderManagement(options = {}) {
 
   function geminiSyncHtml() {
     const state = options.geminiSync;
+    const service = options.geminiService;
     if (state?.configured !== true) return '';
     const enabled = state.enabled === true;
     const busy = state.busy === true;
@@ -115,6 +116,7 @@ function renderManagement(options = {}) {
     const refreshToken = controlCsrf['gemini-refresh'];
     const toggleToken = controlCsrf['gemini-toggle'];
     return `<section id="gemini-auto-update"><div class="section-heading"><div><p class="eyebrow">订阅模型</p><h2>Gemini 自动更新</h2></div><span class="badge ${healthy ? 'ok' : degraded || !enabled || state.state === 'paused' ? 'warn' : ''}" role="status">${current}</span></div>
+      ${service ? `<p class="notice${service.state === 'unavailable' ? ' error' : service.state === 'ready' ? ' success' : ''}" role="status"><strong>本机连接组件：</strong>${escape(service.message)}</p>` : ''}
       <p class="hint">每 ${number(minutes)} 分钟检查当前 Google 账号可用的型号与接入资料。新型号通过兼容性验证后，自动加入模型选择器。</p>
       ${state.message ? `<p class="notice${degraded ? ' error' : ''}">${escape(state.message)}</p>` : ''}
       ${degraded ? '<p class="notice">部分检查暂时无法完成，已保留上次可用模型列表；待连接或资料恢复后继续检查。</p>' : ''}

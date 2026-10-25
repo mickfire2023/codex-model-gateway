@@ -6,7 +6,7 @@ const {prepareChatRequest,convertChatStream}=require('./chat-completions.cjs');
 const {isCompactionRequest,expandLocalCompactions,makeSummaryRequest,makeCompactionEvents}=require('./compaction.cjs');
 const fail=(message,code,status=400)=>Object.assign(new Error(message),{code,status});
 
-function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requestUpstream,readBody,events,log=()=>{},legacyCustomInstructions=[]}) {
+function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requestUpstream,readBody,events,log=()=>{},legacyCustomInstructions=[],beforeRequest}) {
   const legacyInstructions=new Set(legacyCustomInstructions);
   function expand(request) { return expandLocalCompactions(request,secret); }
   async function upstreamError(upstream,provider,gemini=false) {
@@ -85,8 +85,14 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
     delete body.stream_id;
     body.stream=true;
     const payload=Buffer.from(JSON.stringify(body));
+    if(beforeRequest)await beforeRequest({provider,target,signal});
     log({event:'provider_request_started',provider,model:request.model});
-    const upstream=await requestUpstream(target.url,{method:'POST',headers:{...target.headers,'content-length':payload.length},signal},payload);
+    let upstream;
+    try{upstream=await requestUpstream(target.url,{method:'POST',headers:{...target.headers,'content-length':payload.length},signal},payload);}
+    catch(error){
+      if(target.providerId==='gemini-subscription'&&error.code==='ECONNREFUSED')throw Object.assign(fail('Gemini 本机组件连接中断；正在检查组件状态，请稍后重试。本次模型请求不会自动重发。','gemini_service_connection_lost',503),{retryAfterSeconds:10});
+      throw error;
+    }
     if (!(upstream.statusCode>=200&&upstream.statusCode<300)) await upstreamError(upstream,provider==='deepseek'?'deepseek':'provider',target.providerId==='gemini-subscription');
     const outgoing=event=> {
       const mapped=event.response?{...event,response:{...event.response,model:request.model}}:event;

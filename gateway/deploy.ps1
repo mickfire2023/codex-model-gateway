@@ -132,7 +132,7 @@ if (-not $PreviousDirectory) {
 }
 $PreviousDirectory = Get-GatewayPhysicalPath (Get-GatewayFullPath $PreviousDirectory)
 if (Test-GatewaySamePath $SourceDirectory $InstallDirectory) { throw 'The source and installation directories must be different.' }
-foreach ($required in @('gateway.cjs','gemini-updater.cjs','provider-runner.cjs','chat-completions.cjs','provider-store.cjs','socket-router.cjs','start.ps1','physical-path.ps1','scheduler.ps1','runner.ps1','restart.ps1','restore.ps1','control.ps1','control-launcher.vbs','enable.ps1','launch.vbs','rescue.cjs','Emergency-restore-GPT.cmd','Open-dashboard.ps1','Open-dashboard.vbs','openai-models.json','deepseek-models.json')) {
+foreach ($required in @('gateway.cjs','gemini-service.cjs','gemini-service.ps1','gemini-updater.cjs','provider-runner.cjs','chat-completions.cjs','provider-store.cjs','socket-router.cjs','start.ps1','physical-path.ps1','scheduler.ps1','runner.ps1','restart.ps1','restore.ps1','control.ps1','control-launcher.vbs','enable.ps1','launch.vbs','rescue.cjs','Emergency-restore-GPT.cmd','Open-dashboard.ps1','Open-dashboard.vbs','openai-models.json','deepseek-models.json')) {
     if (-not (Test-Path -LiteralPath (Join-Path $SourceDirectory $required) -PathType Leaf)) { throw ('The release is incomplete: ' + $required) }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PreviousDirectory 'private\settings.json') -PathType Leaf)) { throw 'The previous gateway settings could not be found. Supply -PreviousDirectory to preserve the existing connection and encrypted credential.' }

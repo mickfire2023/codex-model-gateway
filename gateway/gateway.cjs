@@ -125,7 +125,7 @@ function createGateway(settings, options = {}) {
     const safe=friendly(error);
     diagnostics.recentErrors.unshift({time:new Date().toISOString(),code:safe.code,message:safe.message,provider:context.provider || null,model:context.model || null});
     diagnostics.recentErrors.length=Math.min(12,diagnostics.recentErrors.length);
-    log({event:'error',code:safe.code,status:safe.status,provider:context.provider || null});
+    log({event:'error',code:safe.code,status:safe.status,provider:context.provider || null,model:context.model || null});
     return safe;
   }
   function mergeCatalog(upstream) {
@@ -166,6 +166,11 @@ function createGateway(settings, options = {}) {
       geminiUpdater={status:()=>({configured:true,enabled:false,busy:false,state:'degraded',errorCode:'gemini_sync_initialization_failed',message:'Gemini 自动更新组件未能初始化，原有模型列表保留。'}),assertRoute:()=>{throw Object.assign(new Error('Gemini 登录组件不可用，请在管理页检查。'),{status:503,code:'gemini_sync_initialization_failed'});}};
     }
   }
+  let geminiService=options.geminiService||null;
+  if(!geminiService&&settings.geminiSubscription?.enabled&&!settings.stagingValidation){
+    try{geminiService=require('./gemini-service.cjs').createGeminiService({directory:settings.geminiSubscription.bridgeDirectory,log});}
+    catch{geminiService={ensure:async()=>{throw Object.assign(new Error('Gemini 本机组件安装信息无效，请修复组件安装。'),{status:503,code:'gemini_service_invalid'});},status:()=>({state:'unavailable',errorCode:'gemini_service_invalid',message:'Gemini 本机组件安装信息无效，请修复组件安装。'})};}
+  }
   function routeFor(model) {
     const custom=providers.routeBySlug(model);
     if(custom){if(custom.providerId==='gemini-subscription')geminiUpdater?.assertRoute?.(custom);return {provider:'custom:'+custom.providerId,...custom};}
@@ -185,7 +190,7 @@ function createGateway(settings, options = {}) {
     stats.lastRoute={model,route:provider,transport,time:new Date().toISOString()};
     log({event:'request',model,route:provider,transport});
   }
-  const providerRunner=require('./provider-runner.cjs').createProviderRunner({providers,deepseekBase,getDeepseekKey:()=>key,secret:settings.routeToken,requestUpstream:providerTransport,readBody,events,log,legacyCustomInstructions:dsCatalog.models.flatMap(m=>[m.base_instructions,m.model_messages?.instructions_template]).filter(x=>typeof x==='string'&&x.length>0)});
+  const providerRunner=require('./provider-runner.cjs').createProviderRunner({providers,deepseekBase,getDeepseekKey:()=>key,secret:settings.routeToken,requestUpstream:providerTransport,readBody,events,log,beforeRequest:({target,signal})=>target.providerId==='gemini-subscription'?geminiService?.ensure({signal}):undefined,legacyCustomInstructions:dsCatalog.models.flatMap(m=>[m.base_instructions,m.model_messages?.instructions_template]).filter(x=>typeof x==='string'&&x.length>0)});
   async function validateDeepseekKey(candidate) {
     if(!/^sk-[A-Za-z0-9_-]{12,}$/.test(candidate))throw Object.assign(new Error('DeepSeek 密钥格式无效，请完整复制密钥。'),{status:400,code:'invalid_key_format'});
     if(options.validateDeepseekKey)return options.validateDeepseekKey(candidate);
@@ -209,7 +214,7 @@ function createGateway(settings, options = {}) {
   function page(res,status=200,lastNotice=notice,providerDraft) {
     res.writeHead(status,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"});
     const syncStatus=updater?.status();
-    return res.end(renderManagement({root,csrf:controlCsrf.key,csrfToken:controlCsrf.key,refreshCsrfToken:controlCsrf.refresh,hasKey:!!key,keyConfigured:!!key,stats,catalog,autoCatalog:updater?{...syncStatus,csrf:controlCsrf.refresh,models:catalog.models}:null,syncStatus,geminiSync:geminiUpdater?.status(),validation,diagnostics:{...diagnostics,control:currentControl()},lastNotice,providers:providers.listProviders(),controlCsrf,providerDraft}));
+    return res.end(renderManagement({root,csrf:controlCsrf.key,csrfToken:controlCsrf.key,refreshCsrfToken:controlCsrf.refresh,hasKey:!!key,keyConfigured:!!key,stats,catalog,autoCatalog:updater?{...syncStatus,csrf:controlCsrf.refresh,models:catalog.models}:null,syncStatus,geminiSync:geminiUpdater?.status(),geminiService:geminiService?.status(),validation,diagnostics:{...diagnostics,control:currentControl()},lastNotice,providers:providers.listProviders(),controlCsrf,providerDraft}));
   }
   function redirect(res,message,type='success') { notice={type,message};res.writeHead(303,{location:root+'/', 'cache-control':'no-store'});res.end(); }
   async function diagnose() {
@@ -282,9 +287,9 @@ function createGateway(settings, options = {}) {
     try {
       url=new URL(req.url,'http://127.0.0.1');
       if(!allowed(req))return json(res,403,{error:{message:'Local gateway access denied'}});
-      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.5.0',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
+      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.5.1',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
       if(!url.pathname.startsWith(root+'/'))return json(res,404,{error:{message:'Not found'}});
-      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.5.0',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
+      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.5.1',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,geminiService:geminiService?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
       if(req.method==='GET'&&url.pathname===root+'/')return page(res);
       if(req.method==='POST'&&url.pathname.startsWith(root+'/settings/')) {
         const action=url.pathname.slice((root+'/settings/').length);
@@ -453,9 +458,9 @@ function createGateway(settings, options = {}) {
     headersFor:(route,incoming)=>route.provider==='openai'?headersFor(incoming):route.provider==='deepseek'?headersFor({},key):providers.upstreamForSlug(route.slug).headers,
     expandInput:request=>providerRunner.expand(request),runProvider:providerRunner.run,note,recordError});
   server.on('clientError',(_error,socket)=>socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
-  server.on('listening',()=>{updater?.start().catch(()=>log({event:'catalog_refresh_failed',code:'catalog_refresh_failed'}));geminiUpdater?.start?.()?.catch(()=>log({event:'gemini_catalog_check_failed',code:'gemini_sync_failed'}));});
-  server.on('close',()=>{updater?.close();geminiUpdater?.close?.();});
-  return {server,stats,catalog:()=>catalog,prefix,updater,geminiUpdater,providers,diagnostics,socketRouter};
+  server.on('listening',()=>{updater?.start().catch(()=>log({event:'catalog_refresh_failed',code:'catalog_refresh_failed'}));Promise.resolve().then(()=>geminiService?.start?.()).catch(()=>log({event:'gemini_service_state',state:'unavailable',code:'gemini_service_unavailable'})).then(()=>geminiUpdater?.start?.()).catch(()=>log({event:'gemini_catalog_check_failed',code:'gemini_sync_failed'}));});
+  server.on('close',()=>{updater?.close();geminiUpdater?.close?.();geminiService?.close?.();});
+  return {server,stats,catalog:()=>catalog,prefix,updater,geminiUpdater,geminiService,providers,diagnostics,socketRouter};
 }
 if (require.main === module) {
   const settings = JSON.parse(fs.readFileSync(path.join(__dirname,'private','settings.json'),'utf8'));
