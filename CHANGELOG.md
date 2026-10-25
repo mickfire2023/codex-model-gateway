@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.1
+
+- Fix Gemini failures with the real Codex client: use provider-neutral custom-model instructions instead of inheriting DeepSeek instructions. Migrate only exact legacy instruction matches for the Gemini subscription adapter; retain user/developer instructions and the full tool list.
+- Complete `generate:false` WebSocket prewarming locally without generating or spending provider quota, and preserve continuation settings for the next real request.
+- Return protocol-compatible WebSocket error status and bounded Retry-After metadata. Keep HTTP errors before streaming as HTTP errors; terminate interrupted streams with `response.failed` instead of leaving Codex waiting for idle timeout.
+- Identify Gemini model cooldowns without exposing raw provider error bodies; include provider/model in redacted error diagnostics.
+- Require the optional bridge's owned process to exit even when status was checked against a different port.
+- Add native-client protocol regressions and validate all five installed Gemini models, including real tool-result continuation. Public automated tests use synthetic providers and credentials.
+
 ## 2.4.0
 
 First general-purpose source release.
