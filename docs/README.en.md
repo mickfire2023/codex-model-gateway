@@ -15,6 +15,8 @@ The installer defaults to the Windows Documents folder, copies its Node runtime,
 
 GPT and DeepSeek catalogs refresh every 30 minutes. Other compatible providers are configured manually. Optional Gemini subscription discovery is a separate, disabled-by-default third-party adapter; it is not a public subscription API. Google restricts third-party reuse of subscription OAuth credentials and access may be suspended. Read [Gemini setup](GEMINI.md) before opting in. Using a paid Gemini API via its compatible endpoint does not require this component.
 
+Optional [Chrome integration](CHROME.md) uses the pinned official Microsoft Playwright MCP in an independent Chrome session. Text models use accessibility snapshots and element actions; an explicitly enabled vision connection also returns screenshots. It preserves existing browser plugins, personal profiles, model settings and normal Codex approvals. Browser compatibility checks are separate, account-dependent tests, not part of the credential-free CI suite.
+
 API keys are protected using the current Windows user's DPAPI and filesystem ACLs. Never upload an installed `private` directory, OAuth files, management URL token, model caches or logs. The repository ships empty catalogs and no accounts. The optional OAuth adapter's JSON tokens are plaintext within a restricted folder, not DPAPI-encrypted.
 
 Restore the original GPT connection with the installed `restore.ps1` and restart Codex. If PowerShell is unavailable, use the installed `Emergency-restore-GPT.cmd`. In-memory cross-model conversation history is bounded and lost on gateway restart; some continuations require a new conversation with a summary.
