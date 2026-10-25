@@ -147,6 +147,9 @@ function createHistoryStore(options = {}) {
     const foreignCarrier = isGpt(context.provider) && fullInput.some(isGeminiReasoningCarrier);
     if (foreignCarrier) fullInput = fullInput.filter(item=>!isGeminiReasoningCarrier(item));
     const prepared = replay || foreignCarrier ? {...clone(request), input: fullInput} : clone(request);
+    if(previous?.warmup&&replay)for(const field of ['instructions','tools','tool_choice','parallel_tool_calls','reasoning','text','max_output_tokens']){
+      if(!own(prepared,field)&&own(previous.request,field))prepared[field]=clone(previous.request[field]);
+    }
     if (replay) delete prepared.previous_response_id;
     return {request: prepared, input: fullInput, complete, namespace: ns, entry: previous, ...(opaqueReasoningScope ? {opaqueReasoningScope} : {})};
   }
@@ -156,7 +159,7 @@ function createHistoryStore(options = {}) {
     const input = [...clone(resolved.input), ...clone(response.output || [])];
     const storedRequest = {...clone(request), input};
     delete storedRequest.previous_response_id;
-    const entry = {input, request: storedRequest, provider: context.provider || 'openai', complete: resolved.complete, expires: now() + ttl,
+    const entry = {input, request: storedRequest, provider: context.provider || 'openai', complete: resolved.complete, expires: now() + ttl,...(request.generate===false?{warmup:true}:{}),
       ...(resolved.opaqueReasoningScope ? {opaqueReasoningScope:resolved.opaqueReasoningScope} : {})};
     entry.bytes = Buffer.byteLength(JSON.stringify(entry));
     const key = resolved.namespace + ':' + response.id;
@@ -206,10 +209,12 @@ function attachSocketRouter(options) {
       if (ended || error?.name === 'AbortError') return;
       let message = String(error?.message || '网关请求失败');
       for (const secret of secrets) if (secret) message = message.split(secret).join('[redacted]');
-      const payload = {type: 'error', error: {type: 'gateway_error', code: String(error?.code || 'gateway_error'), message}};
-      if (lane?.id !== '') payload.stream_id = lane.id;
+      const status=Number(error?.status);
+      const payload = {type: 'error', status:Number.isInteger(status)&&status>=400&&status<600?status:502, error: {type: 'gateway_error', code: String(error?.code || 'gateway_error'), message}};
+      if(Number.isSafeInteger(error?.retryAfterSeconds)&&error.retryAfterSeconds>0&&error.retryAfterSeconds<=604800)payload.headers={'retry-after':String(error.retryAfterSeconds)};
+      if (lane?.id) payload.stream_id = lane.id;
       send(payload);
-      try { recordError({code: payload.error.code, message, status: error?.status || 502}, {transport: 'websocket', stream_id: lane?.id}); } catch {}
+      try { recordError({code: payload.error.code, message, status:payload.status,...(error?.retryAfterSeconds?{retryAfterSeconds:error.retryAfterSeconds}:{})}, {transport: 'websocket', stream_id: lane?.id,provider:lane?.route?.provider,model:lane?.active?.request?.model}); } catch {}
     }
     function laneFor(request) {
       const id = laneOf(request);

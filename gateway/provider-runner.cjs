@@ -1,21 +1,38 @@
 'use strict';
+const {randomUUID}=require('node:crypto');
+const {DEFAULT_CUSTOM_INSTRUCTIONS}=require('./provider-store.cjs');
 const {createAdapter}=require('./deepseek-adapter.cjs');
 const {prepareChatRequest,convertChatStream}=require('./chat-completions.cjs');
 const {isCompactionRequest,expandLocalCompactions,makeSummaryRequest,makeCompactionEvents}=require('./compaction.cjs');
 const fail=(message,code,status=400)=>Object.assign(new Error(message),{code,status});
 
-function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requestUpstream,readBody,events,log=()=>{}}) {
+function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requestUpstream,readBody,events,log=()=>{},legacyCustomInstructions=[]}) {
+  const legacyInstructions=new Set(legacyCustomInstructions);
   function expand(request) { return expandLocalCompactions(request,secret); }
-  async function upstreamError(upstream,provider) {
+  async function upstreamError(upstream,provider,gemini=false) {
     // Provider error bodies can echo credentials or private prompts. Consume but never expose them.
-    await readBody(upstream);
+    const raw=await readBody(upstream);
     const status=upstream.statusCode;
-    const message=status===401||status===403?'密钥无效或账号无权使用所选模型，请在管理页检查。':status===402?'服务商余额不足，请检查账户余额。':status===429?'服务商请求频率或额度受限，请稍后再试。':`服务商返回 HTTP ${status}，请检查 API 地址、模型权限和接口类型。`;
-    throw fail(message,provider+'_http_error',status>=400&&status<600?status:502);
+    const advice=String(upstream.headers?.['retry-after']||'');
+    const seconds=/^\d{1,6}$/.test(advice)?Number(advice):Math.ceil((Date.parse(advice)-Date.now())/1000);
+    const retryAfterSeconds=Number.isSafeInteger(seconds)&&seconds>0&&seconds<=604800?seconds:undefined;
+    let cooldown=false;
+    if(gemini&&status===429&&raw.length<=65536){try{cooldown=JSON.parse(raw.toString('utf8')).error?.code==='model_cooldown';}catch{}}
+    const message=cooldown?`当前 Gemini 型号正在上游冷却${retryAfterSeconds?`，约 ${retryAfterSeconds} 秒后可重试`:''}；可以先选择其他可用型号。`:status===401||status===403?'密钥无效或账号无权使用所选模型，请在管理页检查。':status===402?'服务商余额不足，请检查账户余额。':status===429?'服务商请求频率或额度受限，请稍后再试。':`服务商返回 HTTP ${status}，请检查 API 地址、模型权限和接口类型。`;
+    throw Object.assign(fail(message,cooldown?'gemini_model_cooldown':provider+'_http_error',status>=400&&status<600?status:502),retryAfterSeconds?{retryAfterSeconds}:{});
   }
   async function run({route,request,emit=()=>{},signal,historyScope}) {
     const provider=typeof route==='string'?route:route.provider;
     const expanded=expand(request);
+    // Codex prewarms WebSocket state with generate:false. A protocol warmup
+    // must finish locally, never spend quota or leave the response lane busy.
+    if(expanded.generate===false){
+      const response={id:'resp_gateway_warmup_'+randomUUID().replaceAll('-',''),object:'response',created_at:Math.floor(Date.now()/1000),status:'completed',model:request.model,output:[],error:null,incomplete_details:null,usage:{input_tokens:0,output_tokens:0,total_tokens:0}};
+      await emit({type:'response.created',sequence_number:0,response:{...response,status:'in_progress',usage:null}});
+      await emit({type:'response.completed',sequence_number:1,response});
+      log({event:'provider_warmup',provider,model:request.model});
+      return response;
+    }
     if (isCompactionRequest(expanded)) {
       const summary=await run({route,request:makeSummaryRequest(expanded),emit:()=>{},signal});
       if (summary?.status!=='completed') throw fail('摘要尚未完整生成，原聊天上下文未替换。请提高输出上限或稍后重试。','compaction_summary_incomplete',502);
@@ -35,6 +52,19 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
       target=providers.upstreamForSlug(request.model);
       const capabilities=target.model;
       body={...expanded,model:target.modelId};
+      // Correct only our exact old provider template in cached Gemini sessions.
+      // User/developer instructions and unrelated system content stay intact.
+      if(target.providerId==='gemini-subscription'){
+        let migrated=false;
+        if(legacyInstructions.has(body.instructions)){body.instructions=DEFAULT_CUSTOM_INSTRUCTIONS;migrated=true;}
+        if(Array.isArray(body.input))body.input=body.input.map(item=>{
+          if(!['system','developer'].includes(item?.role))return item;
+          if(typeof item.content==='string'&&legacyInstructions.has(item.content)){migrated=true;return {...item,content:DEFAULT_CUSTOM_INSTRUCTIONS};}
+          if(Array.isArray(item.content)&&item.content.length===1&&['input_text','text'].includes(item.content[0]?.type)&&legacyInstructions.has(item.content[0]?.text)){migrated=true;return {...item,content:[{...item.content[0],text:DEFAULT_CUSTOM_INSTRUCTIONS}]};}
+          return item;
+        });
+        if(migrated)log({event:'legacy_custom_instructions_migrated',provider,model:request.model});
+      }
       if (!capabilities.inputModalities.includes('image') && JSON.stringify(body.input||[]).includes('"type":"input_image"')) throw fail('该模型配置为仅支持文本，请切换支持图片的模型或移除图片。','unsupported_image_input');
       if (!capabilities.supportsTools) { delete body.tools; delete body.tool_choice; delete body.parallel_tool_calls; }
       if (body.reasoning) {
@@ -55,8 +85,9 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
     delete body.stream_id;
     body.stream=true;
     const payload=Buffer.from(JSON.stringify(body));
+    log({event:'provider_request_started',provider,model:request.model});
     const upstream=await requestUpstream(target.url,{method:'POST',headers:{...target.headers,'content-length':payload.length},signal},payload);
-    if (!(upstream.statusCode>=200&&upstream.statusCode<300)) await upstreamError(upstream,provider==='deepseek'?'deepseek':'provider');
+    if (!(upstream.statusCode>=200&&upstream.statusCode<300)) await upstreamError(upstream,provider==='deepseek'?'deepseek':'provider',target.providerId==='gemini-subscription');
     const outgoing=event=> {
       const mapped=event.response?{...event,response:{...event.response,model:request.model}}:event;
       return emit(mapped);

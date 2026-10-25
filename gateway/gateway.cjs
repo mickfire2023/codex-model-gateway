@@ -12,7 +12,7 @@ const {WebSocket, WebSocketServer} = require('ws');
 const {createAdapter} = require('./deepseek-adapter.cjs');
 const {isCompactionRequest,expandLocalCompactions,makeSummaryRequest,makeCompactionEvents} = require('./compaction.cjs');
 const {renderManagement} = require('./management-page.cjs');
-const {createProviderStore} = require('./provider-store.cjs');
+const {createProviderStore,DEFAULT_CUSTOM_INSTRUCTIONS} = require('./provider-store.cjs');
 const {attachSocketRouter} = require('./socket-router.cjs');
 const {prepareChatRequest,convertChatStream} = require('./chat-completions.cjs');
 
@@ -81,6 +81,7 @@ function saveKey(dir,key) {
 }
 function createGateway(settings, options = {}) {
   const dir=path.resolve(settings.directory || __dirname);
+  const providerTransport=options.providerRequestUpstream||requestUpstream;
   fs.mkdirSync(path.join(dir,'private'),{recursive:true});
   const root='/'+settings.routeToken, prefix=root+'/backend-api/codex';
   const tokenFor=action=>createHmac('sha256',settings.routeToken).update(action==='key'?'codex-gateway:admin:key-form:v1':action==='refresh'?'codex-gateway:admin:catalog-refresh:v1':'codex-gateway:admin:'+action+':v2').digest('hex');
@@ -92,7 +93,7 @@ function createGateway(settings, options = {}) {
   let original=JSON.parse(fs.readFileSync(path.join(dir,'openai-models.json'),'utf8'));
   let dsCatalog=JSON.parse(fs.readFileSync(path.join(dir,'deepseek-models.json'),'utf8'));
   const deepseekIds=new Set(dsCatalog.models.map(model=>model.slug));
-  const providers=options.providerStore || createProviderStore({directory:dir,template:dsCatalog.models[0] || {base_instructions:'You are a coding assistant. Follow the user request and use tools when appropriate.'},credentialStore:options.credentialStore,request:options.providerRequest});
+  const providers=options.providerStore || createProviderStore({directory:dir,template:{base_instructions:DEFAULT_CUSTOM_INSTRUCTIONS,model_messages:{instructions_template:DEFAULT_CUSTOM_INSTRUCTIONS}},credentialStore:options.credentialStore,request:options.providerRequest});
   const stats={startedAt:new Date().toISOString(),gptRequests:0,deepseekRequests:0,customRequests:0,catalogRequests:0,lastRoute:null};
   const diagnostics={lastCheckedAt:null,checks:[],recentErrors:[],control:null};
   let validation={status:'unknown',checkedAt:null,message:'尚未进行连接检查；已保存的密钥仍会继续使用。'};
@@ -110,7 +111,7 @@ function createGateway(settings, options = {}) {
     if(error?.name==='AbortError') message='请求已取消。';
     else if(status===401||status===403) message='账号凭据无效或没有模型权限，请检查登录或密钥。';
     else if(status===402) message='服务商余额不足，请检查账户余额。';
-    else if(status===429) message='服务商请求频率或额度受限，请稍后再试。';
+    else if(status===429) message=code==='gemini_model_cooldown'?`当前 Gemini 型号正在上游冷却${Number.isSafeInteger(error.retryAfterSeconds)?`，约 ${error.retryAfterSeconds} 秒后可重试`:''}；可以先选择其他可用型号。`:'服务商请求频率或额度受限，请稍后再试。';
     else if(/ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|CERT_|ERR_TLS/.test(code)||/timed out|fetch failed/i.test(message)) message='无法连接服务商，请检查网络、代理和 API 地址。';
     else if(!/[\u3400-\u9fff]/.test(message)) {
       const known={deepseek_key_missing:'请先在管理页保存并验证 DeepSeek 密钥。',invalid_json:'请求内容无效。',incompatible_compacted_history:'此聊天包含无法迁移的 GPT 加密上下文，请新建聊天或带摘要继续。',local_compaction_invalid:'无法读取本地压缩上下文，请带摘要新建聊天。',incomplete_upstream_stream:'服务商连接结束但没有完成回复，本次请求不会自动重试。'};
@@ -118,7 +119,7 @@ function createGateway(settings, options = {}) {
     }
     if(key) message=message.split(key).join('[已隐藏]');
     message=message.replace(/\bsk-[A-Za-z0-9_-]{8,}/g,'[已隐藏]').slice(0,700);
-    return {code,status:status>=400&&status<600?status:502,message};
+    return {code,status:status>=400&&status<600?status:502,message,...(Number.isSafeInteger(error?.retryAfterSeconds)&&error.retryAfterSeconds>0&&error.retryAfterSeconds<=604800?{retryAfterSeconds:error.retryAfterSeconds}:{})};
   }
   function recordError(error,context={}) {
     const safe=friendly(error);
@@ -181,7 +182,7 @@ function createGateway(settings, options = {}) {
     stats.lastRoute={model,route:provider,transport,time:new Date().toISOString()};
     log({event:'request',model,route:provider,transport});
   }
-  const providerRunner=require('./provider-runner.cjs').createProviderRunner({providers,deepseekBase,getDeepseekKey:()=>key,secret:settings.routeToken,requestUpstream,readBody,events,log});
+  const providerRunner=require('./provider-runner.cjs').createProviderRunner({providers,deepseekBase,getDeepseekKey:()=>key,secret:settings.routeToken,requestUpstream:providerTransport,readBody,events,log,legacyCustomInstructions:dsCatalog.models.flatMap(m=>[m.base_instructions,m.model_messages?.instructions_template]).filter(x=>typeof x==='string'&&x.length>0)});
   async function validateDeepseekKey(candidate) {
     if(!/^sk-[A-Za-z0-9_-]{12,}$/.test(candidate))throw Object.assign(new Error('DeepSeek 密钥格式无效，请完整复制密钥。'),{status:400,code:'invalid_key_format'});
     if(options.validateDeepseekKey)return options.validateDeepseekKey(candidate);
@@ -278,9 +279,9 @@ function createGateway(settings, options = {}) {
     try {
       url=new URL(req.url,'http://127.0.0.1');
       if(!allowed(req))return json(res,403,{error:{message:'Local gateway access denied'}});
-      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.4.0',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
+      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.4.1',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
       if(!url.pathname.startsWith(root+'/'))return json(res,404,{error:{message:'Not found'}});
-      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.4.0',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
+      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.4.1',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
       if(req.method==='GET'&&url.pathname===root+'/')return page(res);
       if(req.method==='POST'&&url.pathname.startsWith(root+'/settings/')) {
         const action=url.pathname.slice((root+'/settings/').length);
@@ -379,12 +380,17 @@ function createGateway(settings, options = {}) {
         if(!['/responses','/responses/compact'].includes(endpoint))return json(res,400,{error:{code:'unsupported_provider_endpoint',message:'此服务商不支持该接口。'}});
         const request=endpoint.endsWith('/compact')?{...resolved.request,compaction_trigger:true}:resolved.request;
         if(body.stream) {
-          res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache',connection:'keep-alive','x-accel-buffering':'no'});res.flushHeaders();
-          const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': keep-alive\n\n');},15000);
+          // Preserve an upstream rejection's HTTP status until actual stream
+          // data arrives. An empty HTTP-200 stream hides 429/401 from Codex.
+          const startStream=()=>{if(!res.headersSent){res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache',connection:'keep-alive','x-accel-buffering':'no'});res.flushHeaders();}};
+          const heartbeat=setInterval(()=>{if(!res.destroyed&&res.headersSent)res.write(': keep-alive\n\n');},15000);
           try{
             let remembered=false;
             const response=await providerRunner.run({route,request,historyScope:resolved.opaqueReasoningScope,signal:controller.signal,emit:async event=>{
               if(res.destroyed)return;
+              startStream();
+              if(event.response?.id)context.responseId=event.response.id;
+              if(Number.isSafeInteger(event.sequence_number))context.sequenceNumber=event.sequence_number;
               // The client can submit tool results as soon as it sees the
               // terminal event, before the upstream closes its SSE connection.
               if(!remembered&&(event.type==='response.completed'||event.type==='response.incomplete')) {await remember(event.response);remembered=true;}
@@ -435,8 +441,9 @@ function createGateway(settings, options = {}) {
     }catch(error){
       if(res.destroyed||error.name==='AbortError')return;
       const safe=recordError(error,context),payload={error:{type:'gateway_error',code:safe.code,message:safe.message}};
+      if(safe.retryAfterSeconds){payload.error.retry_after_seconds=safe.retryAfterSeconds;if(!res.headersSent)res.setHeader('retry-after',String(safe.retryAfterSeconds));}
       if(!res.headersSent)return json(res,safe.status,payload);
-      res.end('event: error\ndata: '+JSON.stringify({type:'error',...payload})+'\n\n');
+      res.end('event: response.failed\ndata: '+JSON.stringify({type:'response.failed',sequence_number:(context.sequenceNumber??-1)+1,response:{id:context.responseId||'resp_gateway_failed_'+require('node:crypto').randomUUID(),object:'response',status:'failed',output:[],error:payload.error}})+'\n\n');
     }
   });
   socketRouter=attachSocketRouter({server,WebSocket,WebSocketServer,prefix,allowed,routeFor,gptBase,historySecret:settings.routeToken,

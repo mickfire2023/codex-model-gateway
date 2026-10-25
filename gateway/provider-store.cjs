@@ -1,4 +1,5 @@
 'use strict';
+const DEFAULT_CUSTOM_INSTRUCTIONS='You are a helpful coding assistant. Follow the user request and all supplied developer instructions. Respect workspace permissions and use the provided tools when appropriate. Verify changes before reporting completion.';
 
 // This module never accepts incoming request headers. Each upstream receives only
 // the credential explicitly configured for that provider.
@@ -542,4 +543,4 @@ function createProviderStore(options = {}) {
   };
 }
 
-module.exports = {createProviderStore, createDpapiCredentialStore, normalizeBaseUrl, makeModelSlug, parseModelSlug};
+module.exports = {DEFAULT_CUSTOM_INSTRUCTIONS,createProviderStore, createDpapiCredentialStore, normalizeBaseUrl, makeModelSlug, parseModelSlug};
