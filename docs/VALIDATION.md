@@ -44,3 +44,12 @@ Private integration checks used the installed native Codex client with its compl
 The first clean English Windows runner exposed a console-encoding failure: WSH could not write a Unicode path to its redirected legacy-code-page error stream, so a missing launcher reported exit code zero. The issue was reproduced locally using a supplementary Unicode character in the synthetic installation path. Console diagnostics now escape non-ASCII characters while message boxes retain Unicode; reporting failures cannot bypass the explicit error exit. The regression covers all three external launchers and the installed shared launcher.
 
 No provider credentials are needed for the published test suite; it does not generate paid model responses. Actual provider availability depends on the user's account. These checks cover component lifecycle; a complete Windows reboot and every Codex distribution are not covered by this release's automated checks. GitHub Actions reruns the public source suite on a clean Windows runner.
+# 2.5.1 Gemini 服务恢复
+
+Node 自动检查 273 项通过；Windows PowerShell 5.1 的 Gemini 生命周期与修复检查 84 项通过；首次安装与保留配置升级检查 18 项通过。
+
+部署后使用原生 Codex 客户端，通过实际主网关调用 Gemini 3.8 Flash，约 6.6 秒正常完成，无 502；保留原有 14 个可选模型。故障注入在独立的本机模拟组件上完成，未强制打断正在处理的生产请求。本轮没有进行 GPT 模型生成测试，也未执行整机重启测试。
+
+新增故障用例覆盖：子进程退出 0、异常退出、强制终止、连续失败退避、端口被其他程序占用、监督任务意外终止后的恢复、用户主动停用、启动任务缺失、并发恢复、请求取消和凭据/配置保留。恢复前失败不得发送生成请求；已尝试发送的请求不得由网关重放。协议预热不调用服务恢复或模型生成。
+
+旧版本只验证了计划内启停，未覆盖这些故障情形。现在将本机组件运行状态与模型目录状态分开报告，端口连接拒绝不再笼统标为外部网络故障。真实 Google 上游权限、限流与网络故障仍可能独立发生。

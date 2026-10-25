@@ -39,6 +39,17 @@ OAuth JSON 为明文，安装目录的 Windows ACL 限制为当前用户；主�
 
 ## 启停与退出
 
+从 2.5.1 起，组件内的监督进程会在子进程意外退出（包括退出码 0）后按 1、2、4、8、16、30 秒上限退避恢复。主网关启动、每 30 秒以及请求发送前也检查已启用的组件任务；任务被意外终止时恢复原任务。显式停止后不会自动重新启用，缺失任务或被其他程序占用的端口不会强行创建或替换。恢复本机服务不生成回复，也不会重放已经发出的模型请求。
+
+已有安装需要同时升级主网关和监督脚本，保留原 Google 登录与密钥：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-gemini.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+自定义安装目录时分别传入 `-BridgeDirectory` 与 `-InstallDirectory`。修复脚本先保存旧监督脚本，并保留原任务的启用/停用状态。退出时间、退出码、运行时长及退避秒数记录于组件 `private/lifecycle.jsonl`，轮换后最多两份；不记录上游输出、正文、账号或令牌。管理页将本机连接组件状态与模型目录更新状态分别显示。组件故障返回明确的 503，Google 权限或额度错误仍按上游状态报告。它修复本机组件停止导致的连接拒绝，不保证第三方上游永不故障。
+
 在组件安装目录运行 `start.ps1`、`status.ps1`、`stop.ps1`，自定义端口时传入相同 `-Port`。它由独立的当前用户计划任务运行，停止仅影响 Gemini。主网关管理页可移除 Gemini 服务商；移除后停用组件任务：
 
 ```powershell
