@@ -41,7 +41,8 @@ function fixture(options = {}) {
       for (const frame of upstream.frames || []) { await Promise.resolve(); yield structuredClone(frame); }
       if (upstream.streamError) throw upstream.streamError;
     },
-    log: entry => observed.logs.push(structuredClone(entry))
+    log: entry => observed.logs.push(structuredClone(entry)),
+    legacyCustomInstructions: options.legacyCustomInstructions || []
   });
   async function run(model, extra = {}, callOptions = {}) {
     const events = [];
@@ -78,6 +79,33 @@ test('DeepSeek uses its dedicated key, preserves its route and fails before tran
   const absent = fixture({deepseekKey: ''});
   await assert.rejects(absent.run('deepseek-chat'), error => error.code === 'deepseek_key_missing');
   assert.equal(absent.observed.requests.length, 0);
+});
+
+test('generate:false finishes a local warmup without provider lookups, quota or transport',async()=>{
+  for(const slug of [RESPONSE_SLUG,CHAT_SLUG,'deepseek-chat']){
+    const f=fixture(),result=await f.run(slug,{generate:false,input:[]});
+    assert.equal(f.observed.requests.length,0);assert.equal(f.observed.lookups.length,0);
+    assert.equal(result.response.status,'completed');assert.deepEqual(result.response.output,[]);
+    assert.deepEqual(result.response.usage,{input_tokens:0,output_tokens:0,total_tokens:0});
+    assert.deepEqual(result.events.map(x=>x.type),['response.created','response.completed']);
+    assert.match(result.response.id,/^resp_gateway_warmup_/);
+  }
+});
+
+test('only validated retry advice and a known Gemini cooldown code reach the public error',async()=>{
+  const f=fixture({respond:()=>({statusCode:429,headers:{'retry-after':'91'},body:JSON.stringify({error:{code:'model_cooldown',message:'private prompt synthetic-key'}})})});
+  f.targets[RESPONSE_SLUG].providerId='gemini-subscription';
+  await assert.rejects(f.run(RESPONSE_SLUG),error=>error.status===429&&error.code==='gemini_model_cooldown'&&error.retryAfterSeconds===91&&!error.message.includes('private prompt'));
+  const unsafe=fixture({respond:()=>({statusCode:429,headers:{'retry-after':'synthetic-private-header'},body:'private prompt'})});
+  await assert.rejects(unsafe.run(RESPONSE_SLUG),error=>error.retryAfterSeconds===undefined&&!error.message.includes('private prompt'));
+});
+
+test('cached Gemini sessions migrate only the exact inherited provider template and retain user instructions',async()=>{
+  const legacy='Synthetic old provider-specific instructions',own='Synthetic user/developer requirements';
+  const f=fixture({legacyCustomInstructions:[legacy]});f.targets[RESPONSE_SLUG].providerId='gemini-subscription';
+  await f.run(RESPONSE_SLUG,{instructions:legacy,input:[msg('system',legacy),msg('developer',own),msg('user',legacy)]});
+  const body=f.observed.requests[0].body;assert.match(body.instructions,/helpful coding assistant/);assert.match(body.input[0].content[0].text,/helpful coding assistant/);assert.equal(body.input[1].content[0].text,own);assert.equal(body.input[2].content[0].text,legacy);
+  const other=fixture({legacyCustomInstructions:[legacy]});await other.run(RESPONSE_SLUG,{instructions:legacy,input:[msg('system',legacy)]});assert.equal(other.observed.requests[0].body.instructions,legacy);assert.equal(other.observed.requests[0].body.input[0].content[0].text,legacy);
 });
 
 test('capability limits clamp output tokens, provide defaults and remove unsupported tool controls', async () => {
@@ -173,7 +201,7 @@ test('local compaction summarizes once, hides the summary stream and returns an 
     assert.doesNotMatch(JSON.stringify(result.events), /Faithful synthetic handoff summary/);
     const expanded = expandLocalCompactions({input: result.response.output}, SECRET);
     assert.match(expanded.input[0].content[0].text, /Faithful synthetic handoff summary/);
-    assert.deepEqual(f.observed.logs, [{event: 'context_compacted', provider: protocol === 'chat_completions' ? 'custom:synthetic-chat' : 'custom:synthetic-responses', model: slug}]);
+    assert.deepEqual(f.observed.logs.filter(x=>x.event!=='provider_request_started'), [{event: 'context_compacted', provider: protocol === 'chat_completions' ? 'custom:synthetic-chat' : 'custom:synthetic-responses', model: slug}]);
   }
 });
 
@@ -193,7 +221,7 @@ test('HTTP provider errors consume but never expose upstream bodies or synthetic
   for (const status of [302, 401, 402, 403, 429, 500]) {
     const f = fixture({respond() { return {statusCode: status, body: 'echo synthetic-responses-key synthetic-chatgpt-credential private prompt'}; }});
     await assert.rejects(f.run(RESPONSE_SLUG), error => error.code === 'provider_http_error' && !/synthetic-|private prompt/.test(error.message));
-    assert.equal(f.observed.readBodies, 1); assert.deepEqual(f.observed.logs, []);
+    assert.equal(f.observed.readBodies, 1);assert.equal(f.observed.logs.length,1);assert.equal(f.observed.logs[0].event,'provider_request_started');assert.doesNotMatch(JSON.stringify(f.observed.logs),/synthetic-responses-key|private prompt/);
   }
 });
 
