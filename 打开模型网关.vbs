@@ -31,8 +31,26 @@ WScript.Quit gatewayResult
 
 Sub GatewayMessage(message)
     If InStr(LCase(WScript.FullName), "cscript.exe") > 0 Then
-        WScript.StdErr.WriteLine message
+        ' Keep console diagnostics representable on every Windows code page.
+        On Error Resume Next
+        WScript.StdErr.WriteLine GatewayConsoleText(message)
+        On Error GoTo 0
     Else
         MsgBox message, vbExclamation, "Codex model gateway"
     End If
 End Sub
+
+Function GatewayConsoleText(message)
+    Dim position, character, code, result
+    result = ""
+    For position = 1 To Len(message)
+        character = Mid(message, position, 1)
+        code = AscW(character) And &HFFFF
+        If (code >= 32 And code <= 126) Or code = 9 Or code = 10 Or code = 13 Then
+            result = result & character
+        Else
+            result = result & "\u" & Right("0000" & Hex(code), 4)
+        End If
+    Next
+    GatewayConsoleText = result
+End Function

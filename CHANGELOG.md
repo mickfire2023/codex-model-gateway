@@ -11,3 +11,4 @@ First general-purpose source release.
 - Discover initial optional Gemini models from the account catalog rather than a fixed personal model list; require explicit opt-in to the third-party subscription adapter.
 - Include Chinese/English setup guidance, recovery and security documentation, locked dependencies and Windows CI.
 - Include synthetic protocol, signature isolation, management, discovery, first-install and scheduled lifecycle checks.
+- Preserve failure exit codes when a VBS diagnostic contains a path that cannot be represented by the Windows console code page; retain Unicode in graphical messages.
