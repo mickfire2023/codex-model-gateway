@@ -1,0 +1,18 @@
+{
+  "name": "codex-model-gateway",
+  "version": "2.4.0",
+  "private": true,
+  "description": "Windows local model gateway for Codex: ChatGPT, DeepSeek and OpenAI-compatible APIs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/gateway/*.test.cjs tests/gemini/*.test.cjs tests/distribution/*.test.cjs",
+    "check:release": "node scripts/check-release.cjs",
+    "test:lifecycle": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway/lifecycle-scheduled.test.ps1"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}
