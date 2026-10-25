@@ -56,7 +56,7 @@ try {
         foreach ($name in @('start.ps1','physical-path.ps1','scheduler.ps1','runner.ps1','restart.ps1','restore.ps1','control.ps1','control-launcher.vbs','enable.ps1','launch.vbs','rescue.cjs','Emergency-restore-GPT.cmd','Open-dashboard.ps1','Open-dashboard.vbs','deploy.ps1')) { Copy-Item -LiteralPath (Join-Path $release $name) -Destination (Join-Path $root $name) }
         Write-GatewayUtf8 (Join-Path $root 'gateway.cjs') $fixtureGateway
         foreach ($name in @('openai-models.json','deepseek-models.json')) { Write-GatewayUtf8 (Join-Path $root $name) '{"models":[]}' }
-        foreach ($name in @('provider-runner.cjs','chat-completions.cjs','provider-store.cjs','socket-router.cjs')) { Write-GatewayUtf8 (Join-Path $root $name) 'module.exports={};' }
+        foreach ($name in @('gemini-updater.cjs','provider-runner.cjs','chat-completions.cjs','provider-store.cjs','socket-router.cjs')) { Write-GatewayUtf8 (Join-Path $root $name) 'module.exports={};' }
     }
     New-Item -ItemType Directory -Path (Join-Path $source 'node_modules\ws') -Force | Out-Null
     Write-GatewayUtf8 (Join-Path $source 'node_modules\ws\package.json') '{"name":"ws","version":"0.0.0-fixture"}'
