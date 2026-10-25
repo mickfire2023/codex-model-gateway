@@ -19,5 +19,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & .\tests\distribution\install.test.ps1
+          & .\tests\distribution\chrome-install.test.ps1
           & .\tests\gateway\lifecycle-scheduled.test.ps1
           & .\tests\gemini\lifecycle.test.ps1
