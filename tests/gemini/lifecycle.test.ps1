@@ -105,7 +105,9 @@ try {
     try { Start-GeminiBridge $fixture $wrongPort 2 | Out-Null } catch { $failed=$true }
     Assert $failed 'readiness failure is reported'
     $state=Get-GeminiBridgeStatus $fixture $testPort
-    Assert (-not $state.TaskActive -and -not $state.Listening -and -not $state.TaskEnabled) 'failed start stops own task and process'
+    Assert (-not $state.TaskActive -and -not $state.Listening -and -not $state.TaskEnabled -and @($state.OwnedProcessIds).Count -eq 0) 'failed start stops own task and process'
+    $wrongState=Get-GeminiBridgeStatus $fixture $wrongPort
+    Assert (@($wrongState.OwnedProcessIds).Count -eq 0) 'wrong readiness port cannot hide an owned proxy process'
     $connection=Get-GeminiBridgeScheduler
     $task=Find-GeminiBridgeTask $connection $identity
     $definition=$task.Definition
