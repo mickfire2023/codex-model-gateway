@@ -93,8 +93,12 @@ function Assert-Repair([bool]$ExpectedEnabled) {
     Assert ((Get-FileHash -LiteralPath (Join-Path $fixture 'runner.ps1') -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $source 'runner.ps1') -Algorithm SHA256).Hash) 'repair installs exact current supervisor'
 }
 function Invoke-RecoveryHelper {
-    $output=& $ps5 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $recoveryHelper -Directory $fixture -Port $testPort -WaitSeconds 20 2>&1
-    return [pscustomobject]@{code=$LASTEXITCODE;text=($output -join "`n")}
+    # Expected failure codes are test data, not the containing CI step's result.
+    $previousExitCode=$global:LASTEXITCODE
+    try {
+        $output=& $ps5 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $recoveryHelper -Directory $fixture -Port $testPort -WaitSeconds 20 2>&1
+        return [pscustomobject]@{code=$LASTEXITCODE;text=($output -join "`n")}
+    } finally { $global:LASTEXITCODE=$previousExitCode }
 }
 function Invoke-Entry([string]$Name,[string[]]$Extra) {
     Push-Location $env:SystemRoot
