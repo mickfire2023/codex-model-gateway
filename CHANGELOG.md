@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.5.1
+
+- Recover an enabled Gemini service at gateway startup, every 30 seconds, and before dispatch when its local listener disappears. Concurrent callers share one recovery; requests already dispatched are never replayed by this mechanism.
+- Supervise Gemini child exits, including exit 0, with capped backoff and private, bounded lifecycle metadata. Preserve explicit stop, account/configuration, exact process ownership and loopback restrictions.
+- Return component-specific 503 errors and show the local Gemini service state separately from catalog freshness. Add an existing-installation supervisor repair script.
+- Add fixture tests for child exits, parent interruption, disabled/missing tasks, occupied ports, cancellation, recovery serialization and no duplicate generation.
+
 ## 2.5.0
 
 - Add optional isolated Chrome connections through the pinned official Microsoft Playwright MCP: text-only accessibility tools by default, plus a separately enabled screenshot-capable connection. Preserve existing models, authentication, plugins and normal approval settings.
