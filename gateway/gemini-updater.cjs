@@ -16,6 +16,22 @@ const clone=value=>structuredClone(value);
 const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail=(code,status=503)=>Object.assign(new Error(code),{code,status});
 const stamp=now=>new Date(now()).toISOString();
+const bridgeSupportCache=new Map();
+function readBridgeCapabilities(root){
+  try{
+    const binary=path.join(root,'cli-proxy-api.exe'),file=path.join(root,'binary-manifest.json');
+    const binaryStat=fs.statSync(binary,{bigint:true}),manifestStat=fs.statSync(file,{bigint:true});
+    if(binaryStat.size>256n*1024n*1024n||manifestStat.size>65536n)return {claudeSignatureReplay:false};
+    const revision=[binaryStat.ino,binaryStat.size,binaryStat.mtimeNs,binaryStat.ctimeNs,manifestStat.ino,manifestStat.size,manifestStat.mtimeNs,manifestStat.ctimeNs].join(':');
+    if(bridgeSupportCache.get(root)?.revision===revision)return clone(bridgeSupportCache.get(root).value);
+    const manifest=JSON.parse(fs.readFileSync(file,'utf8'));
+    const expected=manifest.patched?.sha256;
+    const supported=manifest.patched?.claudeQ19===true&&/^[a-f0-9]{64}$/.test(expected||'')&&crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex')===expected;
+    const value={claudeSignatureReplay:supported};
+    if(bridgeSupportCache.size>=16)bridgeSupportCache.delete(bridgeSupportCache.keys().next().value);
+    bridgeSupportCache.set(root,{revision,value});return clone(value);
+  }catch{return {claudeSignatureReplay:false};}
+}
 function fingerprint(model){return hash([ADAPTER,model.id,model.contextWindow,model.maxOutputTokens,model.inputModalities,model.reasoningEfforts,model.defaultReasoningEffort,model.supportsTools,model.preserveOpaqueReasoning]);}
 // Selectable effort metadata does not change the signed tool transport already validated.
 function protocolFingerprint(model){return hash([ADAPTER,model.id,model.contextWindow,model.maxOutputTokens,model.inputModalities,model.supportsTools,model.preserveOpaqueReasoning]);}
@@ -84,9 +100,9 @@ async function readCatalogs(root,target,{signal,requestJSON=readJSON}={}){
     requestJSON(new URL(base+'/v8/management/credentials/models?name='+encodeURIComponent(current.name)),{headers:{authorization:'Bearer '+control.managementKey},signal}),
     requestJSON(new URL(base+'/v8/management/routing/model-definitions/antigravity'),{headers:{authorization:'Bearer '+control.managementKey},signal})
   ]);
-  return {available,native,registered,definitions};
+  return {available,native,registered,definitions,bridgeCapabilities:readBridgeCapabilities(root)};
 }
-function discoverModels({available,native,registered,definitions}){
+function discoverModels({available,native,registered,definitions,bridgeCapabilities}){
   if(!Array.isArray(available?.data)||!Array.isArray(native?.models)||!Array.isArray(registered?.models)||!available.data.length||!registered.models.length)throw fail('gemini_catalog_empty_or_invalid');
   if([available.data,native.models,registered.models].some(rows=>rows.length>10000))throw fail('gemini_catalog_too_large');
   const metadata=new Map();
@@ -109,6 +125,7 @@ function discoverModels({available,native,registered,definitions}){
     seen.add(row.id);
     // Static/public definitions never confer entitlement on this signed-in account.
     if(!ids.has(row.id))continue;
+    if(row.id.startsWith('claude-')&&bridgeCapabilities?.claudeSignatureReplay!==true){pending.push({id:row.id,reason:'请先升级本机 Antigravity 组件以支持 Claude 思考签名续聊'});continue;}
     const matches=native.models.filter(model=>typeof model?.name==='string'&&model.name.replace(/^models\//,'')===row.id);
     if(matches.length!==1){pending.push({id:row.id,reason:'模型能力资料尚未确认'});continue;}
     const detail=matches[0];
@@ -223,6 +240,7 @@ function createGeminiUpdater(options){
     const snapshot=providers.getDiscoverySnapshot(PROVIDER);
     if(!snapshot)throw fail('gemini_provider_removed');
     assertAccount(snapshot.provider.opaqueReasoningIdentity);
+    if(/^claude-/.test(route.modelId||'')&&(options.readBridgeCapabilities||readBridgeCapabilities)(bridgeDirectory).claudeSignatureReplay!==true)throw Object.assign(new Error('请先升级本机 Antigravity 组件，当前版本不支持 Claude 思考签名续聊。'),{code:'antigravity_bridge_upgrade_required',status:503});
   }
   function key(identity,model){return hash([identity,fingerprint(model)]);}
   async function perform(){
@@ -331,4 +349,4 @@ function createGeminiUpdater(options){
   }
   return {start,refresh,status,assertRoute,close,setEnabled};
 }
-module.exports={createGeminiUpdater,createToolProbe,discoverModels,fingerprint,protocolFingerprint,account,readCatalogs};
+module.exports={createGeminiUpdater,createToolProbe,discoverModels,fingerprint,protocolFingerprint,account,readCatalogs,readBridgeCapabilities};

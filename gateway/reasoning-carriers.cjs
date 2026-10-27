@@ -34,7 +34,7 @@ function protobufFields(bytes) {
     throw Error('invalid varint');
   }
   try{
-    const fields=new Map();
+    const fields=new Map();fields.duplicates=new Set();
     while(offset<bytes.length){
       const tag=integer(),number=Number(tag>>3n),wire=Number(tag&7n);
       if(number<1||number>536870911) return;
@@ -49,6 +49,7 @@ function protobufFields(bytes) {
         if(offset+length>bytes.length)return;
         value=bytes.subarray(offset,offset+length);offset+=length;
       }else return;
+      if(fields.has(number))fields.duplicates.add(number);
       fields.set(number,{wire,value});
     }
     return fields;
@@ -72,7 +73,11 @@ function isClaudeSignature(signature) {
   const channel=protobufFields(field(container,1,2));
   if(field(channel,1,0)===undefined)return false;
   if(qForm){
-    return field(root,1,0)===4n && field(channel,1,0)===18n && field(channel,2,0)===2n &&
+    // Google has issued version-4 thinking on both channels 18 and 19.
+    // A newly observed channel still needs an explicit envelope review; its
+    // ID alone never authorizes replay outside the account/model history scope.
+    return !root.duplicates.has(2) && !container.duplicates.has(1) &&
+      field(root,1,0)===4n && [18n,19n].includes(field(channel,1,0)) && field(channel,2,0)===2n &&
       field(channel,8,2)?.toString('utf8')==='thinking' && !!field(container,5,2)?.length;
   }
   for(const [number,wire] of [[2,0],[6,2],[7,0]])if(channel.has(number)&&channel.get(number).wire!==wire)return false;

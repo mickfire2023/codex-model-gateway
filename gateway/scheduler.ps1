@@ -27,7 +27,9 @@ function Get-GatewaySchedulerIdentity([string]$Root, [ValidateSet('service','res
     return [pscustomobject]@{
         Root = $rootPath; Kind = $Kind; Name = $name; Sid = $sid
         Marker = 'CodexModelGateway managed task v3|' + $Kind + '|' + $rootPath.ToLowerInvariant()
-        Executable = $powershell; Arguments = $arguments
+        Executable = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        Arguments = '//B //NoLogo "' + (Join-Path $rootPath 'task-launcher.vbs') + '" ' + $Kind
+        LegacyExecutable = $powershell; LegacyArguments = $arguments
     }
 }
 function Get-GatewaySchedulerConnection {
@@ -46,7 +48,53 @@ function Assert-GatewayTaskDefinitionOwned($Definition, $Identity) {
     if ((ConvertTo-GatewaySchedulerSid ([string]$Definition.Principal.UserId)) -ne $Identity.Sid -or [int]$Definition.Principal.LogonType -ne 3 -or [int]$Definition.Principal.RunLevel -ne 0) { throw 'The gateway task has a different account or permission level; it was left untouched.' }
     if ([int]$Definition.Actions.Count -ne 1) { throw 'The gateway task has unexpected actions; it was left untouched.' }
     $action = $Definition.Actions.Item(1)
-    if ([int]$action.Type -ne 0 -or -not [string]::Equals([string]$action.Path, [string]$Identity.Executable, [StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([string]$action.Arguments, [string]$Identity.Arguments, [StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([string]$action.WorkingDirectory, [string]$Identity.Root, [StringComparison]::OrdinalIgnoreCase)) { throw 'The gateway task target changed; it was left untouched.' }
+    $current = [string]::Equals([string]$action.Path, [string]$Identity.Executable, [StringComparison]::OrdinalIgnoreCase) -and [string]::Equals([string]$action.Arguments, [string]$Identity.Arguments, [StringComparison]::OrdinalIgnoreCase)
+    $legacy = [string]::Equals([string]$action.Path, [string]$Identity.LegacyExecutable, [StringComparison]::OrdinalIgnoreCase) -and [string]::Equals([string]$action.Arguments, [string]$Identity.LegacyArguments, [StringComparison]::OrdinalIgnoreCase)
+    if ([int]$action.Type -ne 0 -or -not ($current -or $legacy) -or -not [string]::Equals([string]$action.WorkingDirectory, [string]$Identity.Root, [StringComparison]::OrdinalIgnoreCase)) { throw 'The gateway task target changed; it was left untouched.' }
+}
+function Test-GatewayTaskUsesLegacyLauncher($Definition, $Identity) {
+    Assert-GatewayTaskDefinitionOwned $Definition $Identity
+    return [string]::Equals([string]$Definition.Actions.Item(1).Path,[string]$Identity.LegacyExecutable,[StringComparison]::OrdinalIgnoreCase)
+}
+function Get-GatewayScheduledLauncherParent([string]$Root, [switch]$RequireManagedLauncher) {
+    $identity = Get-GatewaySchedulerIdentity $Root 'service'
+    $task = Find-GatewayScheduledTask (Get-GatewaySchedulerConnection) $identity
+    $requiresGui = ($task -and -not (Test-GatewayTaskUsesLegacyLauncher $task.Definition $identity)) -or ($RequireManagedLauncher -and -not $task)
+    $self = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $PID) -ErrorAction Stop
+    $parent = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$self.ParentProcessId) -ErrorAction SilentlyContinue
+    $arguments = [regex]::Replace([string]$parent.CommandLine,'^(?:"[^"]+"|\S+)\s+','')
+    if ($parent -and [string]::Equals([string]$parent.ExecutablePath,$identity.Executable,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($arguments,$identity.Arguments,[StringComparison]::OrdinalIgnoreCase)) {
+        $process = $null
+        try {
+            $process = [Diagnostics.Process]::GetProcessById([int]$parent.ProcessId)
+            $null = $process.Handle # Hold the process object, not a reusable PID.
+            $fresh = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$parent.ProcessId) -ErrorAction SilentlyContinue
+            if (-not $fresh -or $fresh.CreationDate -ne $parent.CreationDate -or $process.HasExited) { throw 'The managed GUI launcher has exited.' }
+            return $process
+        } catch { if ($process) { $process.Dispose() }; throw }
+    }
+    if ($requiresGui) { throw 'The managed GUI launcher is unavailable; the runner will not continue detached.' }
+    return $null # Legacy scheduled actions and isolated process-mode fixtures.
+}
+function Update-GatewayScheduledTaskLauncher([string]$Root, [ValidateSet('service','restart','restore')][string]$Kind = 'service') {
+    $identity = Get-GatewaySchedulerIdentity $Root $Kind
+    $connection = Get-GatewaySchedulerConnection
+    $task = Find-GatewayScheduledTask $connection $identity
+    if (-not $task) { throw 'The owned gateway task is missing; no task was recreated.' }
+    if (-not (Test-GatewayTaskUsesLegacyLauncher $task.Definition $identity)) { return $task }
+    if (Test-GatewayScheduledTaskActive $task) { throw 'Stop the owned gateway task before upgrading its launcher.' }
+    foreach ($file in @($identity.Executable,(Join-Path $identity.Root 'task-launcher.vbs'))) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'The windowless gateway task launcher is missing.' }
+    }
+    # Preserve the original principal, triggers, settings and enabled state.
+    # Only an exact previously owned PowerShell action may be migrated.
+    $definition = $task.Definition
+    $definition.Settings.Enabled = [bool]$task.Enabled
+    $action = $definition.Actions.Item(1)
+    $action.Path = $identity.Executable
+    $action.Arguments = $identity.Arguments
+    Assert-GatewayTaskDefinitionOwned $definition $identity
+    return $connection.Folder.RegisterTaskDefinition($identity.Name,$definition,6,$identity.Sid,$null,3,$null)
 }
 function Find-GatewayScheduledTask($Connection, $Identity) {
     try { $task = $Connection.Folder.GetTask($Identity.Name) }
@@ -63,7 +111,7 @@ function Test-GatewayScheduledTaskActive($Task) {
 }
 function New-GatewayScheduledDefinition($Connection, $Identity) {
     $target = Join-Path $Identity.Root $(if ($Identity.Kind -eq 'service') { 'runner.ps1' } else { 'control.ps1' })
-    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'The gateway task script is missing.' }
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $Identity.Root 'task-launcher.vbs') -PathType Leaf)) { throw 'The gateway task script or windowless launcher is missing.' }
     $definition = $Connection.Service.NewTask(0)
     $definition.RegistrationInfo.Description = $Identity.Marker
     $definition.RegistrationInfo.Author = 'CodexModelGateway/' + $Identity.Sid
@@ -96,6 +144,10 @@ function Register-GatewayScheduledTask([string]$Root, [ValidateSet('service','re
     $connection = Get-GatewaySchedulerConnection
     $previous = Find-GatewayScheduledTask $connection $identity
     if (Test-GatewayScheduledTaskActive $previous) { return $previous }
+    if ($previous) {
+        if (Test-GatewayTaskUsesLegacyLauncher $previous.Definition $identity) { return Update-GatewayScheduledTaskLauncher $Root $Kind }
+        return $previous
+    }
     $definition = New-GatewayScheduledDefinition $connection $identity
     return $connection.Folder.RegisterTaskDefinition($identity.Name, $definition, 6, $identity.Sid, $null, 3, $null)
 }
