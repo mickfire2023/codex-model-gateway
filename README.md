@@ -1,6 +1,6 @@
 # Codex Model Gateway
 
-[English](docs/README.en.md) · [安装与恢复](docs/INSTALL.md) · [Chrome 接入](docs/CHROME.md) · [Gemini 可选组件](docs/GEMINI.md)
+[English](docs/README.en.md) · [安装与恢复](docs/INSTALL.md) · [Chrome 接入](docs/CHROME.md) · [Antigravity 可选组件](docs/GEMINI.md)
 
 一个运行在 Windows 本机的 Codex 模型网关。在保留原有 ChatGPT 登录与 GPT 模型的同时，将 DeepSeek 和其他 OpenAI 兼容 API 加入同一个模型选择器。
 
@@ -14,7 +14,7 @@
 - 管理页可配置密钥、诊断连接、试用模型、刷新目录、重启与恢复 GPT 直连。
 - GPT / DeepSeek 每 30 分钟检查目录；失败时保留已知列表。模型是否可用取决于账号、客户端版本和上游兼容性。
 - 当前用户的 Windows 计划任务负责后台运行，不依赖 Codex 进程存活；无需管理员权限或 Windows 密码。
-- 可选 Gemini 第三方订阅适配及工具兼容性验证后的自动发现，默认不安装。
+- 可选 Antigravity 第三方订阅适配（Gemini 与 Claude）及工具兼容性验证后的自动发现，默认不安装；Claude 5.5 支持三档思考，需单独下载本项目校验过的兼容构建。
 - 可选微软官方 Playwright MCP Chrome 接入：纯文本模型通过页面元素操作，视觉模型可单独启用截图；使用独立 Chrome 状态，保留原浏览器插件和登录。
 
 ## 快速开始
@@ -39,7 +39,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 远程地址要求 HTTPS，本机接口允许 `http://127.0.0.1:端口`。没有模型列表接口的服务商暂不支持直接保存。具体供应商的工具和推理能力需要实际验证；协议兼容不代表所有模型都能执行编程任务。
 
-Gemini 付费 API 可按上述方式添加兼容接口。**Gemini 订阅登录不是公开付费 API**，第三方复用登录凭据受到 Google 条款限制，可能导致访问被停用；可选订阅组件的限制、独立安装与关闭方法见 [Gemini 说明](docs/GEMINI.md)。
+Gemini 付费 API 可按上述方式添加兼容接口。**Gemini 订阅登录不是公开付费 API**，第三方复用登录凭据受到 Google 条款限制，可能导致访问被停用；可选订阅组件的限制、独立安装与关闭方法见 [订阅组件说明](docs/GEMINI.md)。
 
 ## 恢复原连接
 

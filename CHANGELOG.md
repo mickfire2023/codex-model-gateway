@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.6.0
+
+- Discover account-listed Antigravity Claude text models alongside Gemini, requiring complete public/account metadata and a real two-turn tool compatibility check before registration. Preserve existing provider IDs, model IDs, credentials and manual exclusions.
+- Advertise Gemini reasoning levels from the provider's declared model definitions and forward the selected/default level. Expose low/medium/high for the known Claude Sonnet 5.5 and Opus 5.5 models, matching the native Antigravity menu and validated bridge budgets; new discoveries of these two models default to medium. Actual thinking output remains adaptive and need not scale proportionally with the budget.
+- Preserve signed Claude reasoning through Codex tool continuations with account/model/session provenance checks. Accept a Claude tool continuation without a reasoning carrier only when the response contains no reasoning items; unsigned or malformed thinking still fails validation.
+- Add the reviewed CLIProxyAPI `8.0.43-gateway.1` compatibility build: accept Claude thinking channels 18 and 19, reject unknown channel 20, and preserve signature bytes exactly. Upstream 8.0.43 and 8.0.44 discard real Claude 5.5 channel-19 thinking; tool-only checks cannot establish signed continuation support. Pin source, patch, Go toolchain and executable hashes in the binary manifest; distribute the executable and upstream MIT license as a separate 2.6.0 release asset.
+- Keep Gemini available with the pinned upstream binary, but leave Claude discoveries pending and reject already registered Claude routes with an upgrade-required 503 until the actual installed binary hash verifies support. Existing users can supply `repair-gemini.ps1 -BinaryPath` to replace the binary with backups and rollback, preserving account authorization, configuration, keys and disabled state; no new OAuth or initialization is needed.
+- Show the existing default subscription provider as Antigravity without overwriting its saved name or user-defined names. Use GUI-hosted scheduled-task launchers and a windowless Node child to avoid Windows Terminal windows on Windows 11. Migrate only exactly owned legacy task actions, preserving other task XML fields and enabled/disabled state, with rollback and parent-host supervision.
+
 ## 2.5.1
 
 - Recover an enabled Gemini service at gateway startup, every 30 seconds, and before dispatch when its local listener disappears. Concurrent callers share one recovery; requests already dispatched are never replayed by this mechanism.

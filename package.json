@@ -1,6 +1,6 @@
 {
   "name": "codex-model-gateway",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "private": true,
   "description": "Windows local model gateway for Codex: ChatGPT, DeepSeek and OpenAI-compatible APIs",
   "license": "MIT",
