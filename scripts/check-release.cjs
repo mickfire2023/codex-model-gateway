@@ -7,6 +7,7 @@ function inspect(files){
     if(/(?:^|\/)(?:private|node_modules|runtime|vendor|\.cache)(?:\/|$)|\.(?:dpapi|exe|dll|log|zip|png)$/i.test(relative)||/(?:^|\/)(?:auth|settings|control|validation|bridge)\.json$/i.test(relative)){problems.push(relative+': runtime/private artifact');continue;}
     const file=path.join(root,relative);if(!fs.existsSync(file)||!fs.statSync(file).isFile())continue;
     const body=fs.readFileSync(file,'utf8');
+    if(!body.length||body.includes('\0'))problems.push(relative+': empty or NUL-corrupted source');
     if(/sk-[a-f0-9]{32,}\b|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i.test(body))problems.push(relative+': credential pattern');
     if (/[A-Z]:[\\/]+Users[\\/]+(?!YOUR_NAME|Fixture|Public|Default)[^\\/\s'"<>]+|[A-Za-z0-9._%+-]+@(?:gmail|outlook|hotmail)\.com/i.test(body))problems.push(relative+': personal installation data');
     if(relative==='gateway/openai-models.json'||relative==='gateway/deepseek-models.json'){try{if(JSON.parse(body).models.length!==0)problems.push(relative+': account/vendor catalog must not ship');}catch{problems.push(relative+': invalid seed');}}
