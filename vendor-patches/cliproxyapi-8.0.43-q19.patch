@@ -1,0 +1,56 @@
+diff --git a/internal/signature/claude_antigravity_validation.go b/internal/signature/claude_antigravity_validation.go
+--- a/internal/signature/claude_antigravity_validation.go
++++ b/internal/signature/claude_antigravity_validation.go
+@@ -36,7 +36,7 @@
+ 	}
+ 	// Scope this new replay shape to the observed Google thinking channel.
+ 	// Other versions/channels require their own capture and replay verification.
+-	if info.EnvelopeVersion != 4 || info.ChannelID != 18 ||
++	if info.EnvelopeVersion != 4 || (info.ChannelID != 18 && info.ChannelID != 19) ||
+ 		info.Infrastructure == nil || *info.Infrastructure != 2 ||
+ 		info.BlockKind != "thinking" || !info.SignatureInContainer {
+ 		return nil, fmt.Errorf("unsupported Antigravity CAQS envelope or channel schema")
+diff --git a/internal/signature/gateway_antigravity_channel_test.go b/internal/signature/gateway_antigravity_channel_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/signature/gateway_antigravity_channel_test.go
+@@ -0,0 +1,39 @@
++package signature
++
++import (
++	"bytes"
++	"encoding/base64"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature/signaturetest"
++)
++
++// Build only synthetic envelopes. No captured account signatures are used.
++func TestGatewayAntigravityThinkingChannels(t *testing.T) {
++	outer, err := base64.StdEncoding.DecodeString(signaturetest.AntigravityCAQS())
++	if err != nil {
++		t.Fatal("synthetic outer decode failed")
++	}
++	raw, err := base64.StdEncoding.DecodeString(string(outer))
++	if err != nil {
++		t.Fatal("synthetic inner decode failed")
++	}
++	index := bytes.Index(raw, []byte{8, 18, 16, 2, 24, 2})
++	if index < 0 {
++		t.Fatal("synthetic channel field missing")
++	}
++	for _, channel := range []byte{18, 19, 20} {
++		candidate := append([]byte(nil), raw...)
++		candidate[index+1] = channel
++		sig := base64.StdEncoding.EncodeToString([]byte(base64.StdEncoding.EncodeToString(candidate)))
++		_, inspectError := InspectAntigravityClaudeCAQSSignature(sig)
++		normalized, compatible := CompatibleAntigravityClaudeThinkingSignature(sig)
++		want := channel == 18 || channel == 19
++		if (inspectError == nil) != want || compatible != want {
++			t.Errorf("channel %d compatibility mismatch", channel)
++		}
++		if want && normalized != sig {
++			t.Errorf("channel %d changed the opaque signature", channel)
++		}
++	}
++}
