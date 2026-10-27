@@ -2,12 +2,26 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const crypto=require('node:crypto');
+const BINARY_MANIFEST=require('./binary-manifest.json');
 
-function initialize(root,{port=8317}={}) {
+function resolveBinaryHash(digest,manifest=BINARY_MANIFEST) {
+  if(!/^[a-f0-9]{64}$/.test(digest)||manifest?.version!==1||manifest.product!=='CLIProxyAPI')throw new Error('Invalid bridge binary manifest.');
+  for(const name of ['official','patched']) {
+    const entry=manifest[name];
+    if(!entry||!/^[a-f0-9]{64}$/.test(entry.sha256)||!/^[0-9A-Za-z.-]{1,80}$/.test(entry.release)||typeof entry.claudeQ19!=='boolean')throw new Error('Invalid bridge binary manifest.');
+  }
+  if(manifest.official.sha256===manifest.patched.sha256)throw new Error('Ambiguous bridge binary manifest.');
+  const entry=[manifest.official,manifest.patched].find(candidate=>candidate.sha256===digest);
+  if(!entry)throw new Error('The bridge binary does not match a verified release.');
+  return {release:entry.release,sha256:digest,claudeQ19:entry.claudeQ19};
+}
+
+function initialize(root,{port=8317,binaryManifest=BINARY_MANIFEST}={}) {
   if(!path.isAbsolute(root)||/[\x00-\x1f]/.test(root))throw new Error('An absolute installation directory is required.');
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('Invalid local port.');
   const binary=path.join(root,'cli-proxy-api.exe');
   if(!fs.existsSync(binary))throw new Error('The verified CLIProxyAPI binary is missing.');
+  const binaryInfo=resolveBinaryHash(crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex'),binaryManifest);
   const privateDir=path.join(root,'private');
   fs.mkdirSync(path.join(privateDir,'auth'),{recursive:true});
   const controlPath=path.join(privateDir,'control.json');
@@ -69,9 +83,9 @@ multimedia:
   disable-image-generation: true
 `;
   fs.writeFileSync(path.join(root,'config.yaml'),yaml,{mode:0o600});
-  const metadata={version:1,product:'CodexGeminiBridge',release:'8.0.43',port,root};
+  const metadata={version:1,product:'CodexGeminiBridge',release:binaryInfo.release,binarySha256:binaryInfo.sha256,claudeSignatureChannels:binaryInfo.claudeQ19?[18,19]:[18],port,root};
   fs.writeFileSync(path.join(root,'bridge.json'),JSON.stringify(metadata,null,2),{mode:0o600});
   return {installed:true,release:metadata.release,port,credentialsConfigured:fs.readdirSync(path.join(privateDir,'auth')).some(x=>x.endsWith('.json'))};
 }
 if(require.main===module){try{console.log(JSON.stringify(initialize(process.argv[2]||'')));}catch{console.error('Bridge initialization failed. Check the verified binary and installation directory.');process.exitCode=1;}}
-module.exports={initialize};
+module.exports={initialize,resolveBinaryHash};
