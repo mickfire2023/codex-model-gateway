@@ -138,6 +138,36 @@ test('configured custom-provider reasoning effort is not remapped by DeepSeek no
   }
 });
 
+test('Antigravity forwards each advertised Gemini effort and uses its model default for stale selections', async () => {
+  const f = fixture({responseCaps: {reasoningEfforts: ['minimal', 'low', 'medium', 'high'], defaultReasoningEffort: 'medium'}});
+  f.targets[RESPONSE_SLUG].providerId = 'gemini-subscription';
+  for (const effort of ['minimal', 'low', 'medium', 'high']) {
+    await f.run(RESPONSE_SLUG, {reasoning: {effort}});
+    assert.deepEqual(f.observed.requests.at(-1).body.reasoning, {effort});
+  }
+  for (const extra of [{}, {reasoning: {effort: 'xhigh'}}, {reasoning: {effort: 'none'}}]) {
+    await f.run(RESPONSE_SLUG, extra);
+    assert.deepEqual(f.observed.requests.at(-1).body.reasoning, {effort: 'medium'});
+  }
+});
+
+test('Antigravity Claude forwards each selected effort without stripping its literal model ID and defaults to medium', async () => {
+  for (const modelId of ['claude-sonnet-5-5-high','claude-opus-5-5-high']) {
+    const f = fixture({responseCaps: {reasoningEfforts: ['low','medium','high'], defaultReasoningEffort: 'medium'}});
+    Object.assign(f.targets[RESPONSE_SLUG], {providerId: 'gemini-subscription', modelId});
+    for (const effort of ['low','medium','high']) {
+      await f.run(RESPONSE_SLUG, {reasoning: {effort}});
+      assert.deepEqual(f.observed.requests.at(-1).body.reasoning, {effort});
+      assert.equal(f.observed.requests.at(-1).body.model, modelId);
+    }
+    for (const extra of [{}, {reasoning: {effort: 'xhigh'}}, {reasoning: {effort: 'none'}}]) {
+      await f.run(RESPONSE_SLUG, extra);
+      assert.deepEqual(f.observed.requests.at(-1).body.reasoning, {effort: 'medium'});
+      assert.equal(f.observed.requests.at(-1).body.model, modelId);
+    }
+  }
+});
+
 test('local stream lane IDs are not sent as unsupported HTTP Responses fields', async () => {
   const f = fixture();
   for (const slug of [RESPONSE_SLUG, CHAT_SLUG]) {

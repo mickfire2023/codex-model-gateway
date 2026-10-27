@@ -101,6 +101,26 @@ test('validate discovers models without saving or claiming Responses/tools infer
   assert.ok(!JSON.stringify(result).includes(KEY_A));
 });
 
+test('legacy subscription display uses Antigravity without changing identity, saved name or custom names', async t=>{
+  const f=fixture(t);
+  await f.store.saveProvider(provider({id:'gemini-subscription',name:'Gemini 订阅'}));
+  const before=fs.readFileSync(f.configFile,'utf8');
+  const published=f.store.listProviders()[0];
+  assert.equal(published.name,'Gemini 订阅');
+  assert.equal(published.displayName,'Antigravity 订阅');
+  const catalog=f.store.catalogModels()[0];
+  assert.equal(catalog.slug,'custom/gemini-subscription/vendor%2Fmodel-1');
+  assert.equal(catalog.provider_name,'Antigravity 订阅');
+  assert.match(catalog.display_name,/Antigravity 订阅/);
+  assert.equal(f.store.routeBySlug(catalog.slug).providerName,'Antigravity 订阅');
+  assert.equal(fs.readFileSync(f.configFile,'utf8'),before);
+  await f.store.saveProvider(provider({id:'gemini-subscription',name:'My Google service'}));
+  assert.equal(f.store.listProviders()[0].displayName,'My Google service');
+  assert.equal(f.store.catalogModels()[0].provider_name,'My Google service');
+  await f.store.saveProvider(provider({id:'unrelated',name:'Gemini 订阅'}));
+  assert.equal(f.store.listProviders().find(p=>p.id==='unrelated').displayName,'Gemini 订阅');
+});
+
 test('provider identity and model IDs yield stable reversible and collision-free slugs', async t=>{
   const f = fixture(t, {request:async()=>({status:200,body:{data:[{id:'vendor/org/模型 % v1:2'}]}})});
   const id = 'vendor/org/模型 % v1:2';

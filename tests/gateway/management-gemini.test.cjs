@@ -21,7 +21,7 @@ test('Gemini controls are absent without an explicit configured connection; exis
 
 test('enabled Gemini shows verified completion and Japanese times with action-specific CSRF controls',()=>{
   const html=render(ready);
-  assert.ok(html.includes('Gemini 自动更新'));
+  assert.ok(html.includes('Antigravity 自动更新'));
   assert.ok(html.includes('每 30 分钟'));
   assert.ok(html.includes('检查完成'));
   assert.ok(html.includes('09:00:00（日本时间）'));
@@ -41,7 +41,7 @@ test('pause preserves the available list and exposes an enable action instead of
   const html=render({...ready,enabled:false,state:'paused'});
   assert.ok(html.includes('已暂停'));
   assert.ok(html.includes('暂停期间不检查'));
-  assert.ok(html.includes('当前 Gemini 模型</dt><dd>2 个'));
+  assert.ok(html.includes('当前订阅模型</dt><dd>2 个'));
   assert.ok(form(html,'gemini-refresh').includes(' disabled'));
   assert.ok(form(html,'gemini-toggle').includes('name="enabled" value="true"'));
   assert.ok(form(html,'gemini-toggle').includes('开启自动更新'));
