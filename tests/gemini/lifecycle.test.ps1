@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$LauncherOnly)
 $ErrorActionPreference='Stop'
 $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\bridge'))
 $fixture = Join-Path $PSScriptRoot ('fixture ' + [char]0x6d4b + [char]0x8bd5 + ' ' + [Guid]::NewGuid().ToString('N'))
@@ -7,7 +7,7 @@ New-Item -ItemType Directory -Path $fixture | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $fixture 'private') | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $fixture 'private\auth') | Out-Null
 [IO.File]::WriteAllText((Join-Path $fixture 'private\auth\synthetic.json'),'SYNTHETIC_OAUTH_BYTES_MUST_BE_PRESERVED',[Text.Encoding]::UTF8)
-foreach($file in @('lifecycle.ps1','start.ps1','stop.ps1','status.ps1','runner.ps1')) { Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $fixture $file) }
+foreach($file in @('lifecycle.ps1','start.ps1','stop.ps1','status.ps1','runner.ps1','task-launcher.vbs')) { Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $fixture $file) }
 $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0)
 $listener.Start()
 $testPort = [int]$listener.LocalEndpoint.Port
@@ -96,7 +96,7 @@ function Assert-Repair([bool]$ExpectedEnabled) {
     }
     $repaired=Get-GeminiBridgeStatus $fixture $testPort
     Assert ($repaired.TaskEnabled -eq $ExpectedEnabled -and $repaired.TaskActive -eq $ExpectedEnabled -and $repaired.Listening -eq $ExpectedEnabled) 'repair preserves enabled or explicitly disabled service state'
-    foreach ($file in @('runner.ps1','lifecycle.ps1','start.ps1','stop.ps1','status.ps1','initialize.cjs','login.cjs','model-catalog-sync.cjs','validate.cjs','register.cjs','enable-automatic-models.cjs')) {
+    foreach ($file in @('runner.ps1','lifecycle.ps1','start.ps1','stop.ps1','status.ps1','task-launcher.vbs','initialize.cjs','login.cjs','model-catalog-sync.cjs','validate.cjs','register.cjs','enable-automatic-models.cjs')) {
         Assert ((Get-FileHash -LiteralPath (Join-Path $fixture $file) -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $source $file) -Algorithm SHA256).Hash) 'repair installs exact current bridge helper set'
     }
     $taskAfter=Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
@@ -147,6 +147,44 @@ function Invoke-Entry([string]$Name,[string[]]$Extra) {
 try {
     Assert ($identity.Root -ceq $fixture) 'Unicode physical directory unchanged'
     Assert (-not (Get-GeminiBridgeStatus $fixture $testPort).TaskExists) 'starts without task'
+    $connection=Get-GeminiBridgeScheduler
+    $legacy=(Register-GeminiBridgeTask $fixture).Definition
+    $legacy.Actions.Item(1).Path=$identity.LegacyExecutable
+    $legacy.Actions.Item(1).Arguments=$identity.LegacyArguments
+    $legacy.Settings.Enabled=$false
+    $legacy.Settings.Hidden=$false
+    $legacy.Triggers.Item(1).Delay='PT7S'
+    $connection.Folder.RegisterTaskDefinition($identity.Name,$legacy,6,$identity.Sid,$null,3,$null)|Out-Null
+    $legacySnapshot=Get-GeminiBridgeTaskSnapshot $fixture
+    Assert (Test-GeminiBridgeTaskUsesLegacyLauncher (Find-GeminiBridgeTask $connection $identity).Definition $identity) 'legacy task recognized without migration'
+    Assert ($null -eq (Get-GeminiBridgeLauncherParent $fixture)) 'genuine legacy task still supports its original parent context'
+    Get-GeminiBridgeStatus $fixture $testPort|Out-Null
+    Assert ((Get-GeminiBridgeTaskSnapshot $fixture).Xml -ceq $legacySnapshot.Xml) 'status leaves legacy action untouched'
+    Update-GeminiBridgeTaskLauncher $fixture|Out-Null
+    $migrated=Find-GeminiBridgeTask $connection $identity
+    Assert (-not $migrated.Enabled -and -not (Test-GeminiBridgeTaskUsesLegacyLauncher $migrated.Definition $identity)) 'migration preserves explicitly disabled legacy service'
+    $unboundRejected=$false
+    try{Get-GeminiBridgeLauncherParent $fixture|Out-Null}catch{$unboundRejected=$true}
+    Assert $unboundRejected 'current GUI task cannot run without its exact launcher parent'
+    Assert (-not $migrated.Definition.Settings.Hidden -and $migrated.Definition.Triggers.Item(1).Delay -ceq 'PT7S') 'migration preserves non-action task settings'
+    Restore-GeminiBridgeTaskSnapshot $fixture $legacySnapshot|Out-Null
+    Assert (Test-GeminiBridgeTaskUsesLegacyLauncher (Find-GeminiBridgeTask $connection $identity).Definition $identity) 'legacy snapshot restores its exact launcher'
+    $badSnapshot=$legacySnapshot.PSObject.Copy()
+    $badSnapshot.Sid='S-1-5-18'
+    $wrongSidRejected=$false
+    try{Restore-GeminiBridgeTaskSnapshot $fixture $badSnapshot|Out-Null}catch{$wrongSidRejected=$true}
+    Assert ($wrongSidRejected -and (Get-GeminiBridgeTaskSnapshot $fixture).Xml -ceq $legacySnapshot.Xml) 'wrong-account snapshot rejected without mutation'
+    $tampered=$connection.Service.NewTask(0)
+    $tampered.XmlText=$legacySnapshot.Xml
+    $tampered.Actions.Item(1).Arguments=$identity.LegacyArguments+' -Unapproved synthetic'
+    $badSnapshot=$legacySnapshot.PSObject.Copy()
+    $badSnapshot.Xml=[string]$tampered.XmlText
+    $tamperedRejected=$false
+    try{Restore-GeminiBridgeTaskSnapshot $fixture $badSnapshot|Out-Null}catch{$tamperedRejected=$true}
+    Assert ($tamperedRejected -and (Get-GeminiBridgeTaskSnapshot $fixture).Xml -ceq $legacySnapshot.Xml) 'tampered legacy action rejected without mutation'
+    Register-GeminiBridgeTask $fixture|Out-Null
+    Assert (-not (Test-GeminiBridgeTaskUsesLegacyLauncher (Find-GeminiBridgeTask $connection $identity).Definition $identity) -and -not (Find-GeminiBridgeTask $connection $identity).Enabled) 'register migrates stopped owned legacy action without enabling it'
+    if($LauncherOnly){[pscustomobject]@{passed=$assertions;launcherOnly=$true;syntheticOnly=$true}|ConvertTo-Json -Compress;return}
     $state=Invoke-Entry 'start.ps1' @()
     Assert ($state.Listening -and $state.TaskActive) 'PS5 omitted Directory starts from different CWD'
     Assert (-not $state.ForeignListener) 'loopback listener belongs to exact binary and config'
@@ -161,7 +199,7 @@ try {
     Assert ([int]$task.Definition.Triggers.Count -eq 1 -and [int]$task.Definition.Triggers.Item(1).Type -eq 9) 'login trigger'
     Assert ([string]$task.Definition.Actions.Item(1).Arguments -ceq $identity.Arguments) 'exact config and local-model args'
     Assert ($identity.BinaryArguments -ceq ('-config "'+(Join-Path $fixture 'config.yaml')+'" -local-model')) 'fixed upstream arguments'
-    Assert ($identity.Arguments -match '-WindowStyle Hidden') 'scheduled runner hidden'
+    Assert ($identity.Executable -ceq (Join-Path $env:SystemRoot 'System32\wscript.exe') -and $identity.Arguments -match '//B //NoLogo') 'scheduled runner uses a GUI host before PowerShell starts'
     Assert ([string]$task.Definition.Actions.Item(1).WorkingDirectory -ceq $fixture) 'exact working directory'
     $repeat=Invoke-Entry 'start.ps1' @()
     Assert ([int]$repeat.ProcessIds[0] -eq $firstPid) 'start idempotent no extra listener'
