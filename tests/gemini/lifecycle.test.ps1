@@ -79,10 +79,16 @@ function Wait-Recovered([int]$PreviousPid,[DateTime]$PreviousStart) {
 $ps5=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $recoveryHelper=[IO.Path]::GetFullPath((Join-Path $source '..\gateway\gemini-service.ps1'))
 $repairHelper=[IO.Path]::GetFullPath((Join-Path $source '..\scripts\repair-gemini.ps1'))
-$preservedPaths=@('config.yaml','bridge.json','private\auth\synthetic.json')
+[IO.File]::WriteAllText((Join-Path $fixture 'private\control.json'),'{"apiKey":"synthetic-local-secret","managementKey":"synthetic-management-secret"}',[Text.Encoding]::UTF8)
+New-Item -ItemType Directory -Path (Join-Path $fixture 'model-catalog') | Out-Null
+[IO.File]::WriteAllText((Join-Path $fixture 'model-catalog\last-good.json'),'{"synthetic":"preserved catalog"}',[Text.Encoding]::UTF8)
+[IO.File]::WriteAllText((Join-Path $fixture 'model-catalog-sync.cjs'),'// synthetic old catalog helper',[Text.Encoding]::UTF8)
+$preservedPaths=@('config.yaml','bridge.json','cli-proxy-api.exe','private\control.json','private\auth\synthetic.json','model-catalog\last-good.json')
 $preservedHashes=@{}
 foreach ($relative in $preservedPaths) { $preservedHashes[$relative]=(Get-FileHash -LiteralPath (Join-Path $fixture $relative) -Algorithm SHA256).Hash }
 function Assert-Repair([bool]$ExpectedEnabled) {
+    $taskBefore=Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
+    $definitionBeforeRepair=[string]$taskBefore.Xml
     $output=& $ps5 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $repairHelper -BridgeDirectory $fixture 2>&1
     Assert ($LASTEXITCODE -eq 0) 'existing installation repair completes without downloading or generating'
     foreach ($relative in $preservedPaths) {
@@ -90,7 +96,37 @@ function Assert-Repair([bool]$ExpectedEnabled) {
     }
     $repaired=Get-GeminiBridgeStatus $fixture $testPort
     Assert ($repaired.TaskEnabled -eq $ExpectedEnabled -and $repaired.TaskActive -eq $ExpectedEnabled -and $repaired.Listening -eq $ExpectedEnabled) 'repair preserves enabled or explicitly disabled service state'
-    Assert ((Get-FileHash -LiteralPath (Join-Path $fixture 'runner.ps1') -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $source 'runner.ps1') -Algorithm SHA256).Hash) 'repair installs exact current supervisor'
+    foreach ($file in @('runner.ps1','lifecycle.ps1','start.ps1','stop.ps1','status.ps1','initialize.cjs','login.cjs','model-catalog-sync.cjs','validate.cjs','register.cjs','enable-automatic-models.cjs')) {
+        Assert ((Get-FileHash -LiteralPath (Join-Path $fixture $file) -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath (Join-Path $source $file) -Algorithm SHA256).Hash) 'repair installs exact current bridge helper set'
+    }
+    $taskAfter=Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
+    Assert ([string]$taskAfter.Xml -ceq $definitionBeforeRepair) 'repair preserves original task definition'
+    $backups=@(Get-ChildItem -LiteralPath (Join-Path $fixture 'private') -Directory -Filter 'helpers-before-repair-*')
+    Assert ($backups.Count -gt 0 -and [IO.File]::Exists((Join-Path $backups[-1].FullName 'manifest.json'))) 'repair retains helper rollback manifest'
+}
+function Assert-RepairRollback {
+    $release=Join-Path $fixture 'private\synthetic-update-release'
+    New-Item -ItemType Directory -Path (Join-Path $release 'bridge') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $release 'scripts') | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $source -File) { Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $release ('bridge\'+$item.Name)) }
+    Copy-Item -LiteralPath $repairHelper -Destination (Join-Path $release 'scripts\repair-gemini.ps1')
+    [IO.File]::WriteAllText((Join-Path $release 'bridge\runner.ps1'),"throw 'Synthetic replacement deliberately fails readiness.'",[Text.Encoding]::ASCII)
+    $before=@{}
+    foreach ($item in Get-ChildItem -LiteralPath $source -File) { $before[$item.Name]=(Get-FileHash -LiteralPath (Join-Path $fixture $item.Name) -Algorithm SHA256).Hash }
+    $priorExitCode=$global:LASTEXITCODE
+    $priorErrorAction=$ErrorActionPreference
+    try {
+        # Windows PowerShell maps the deliberately failing child's stderr to
+        # ErrorRecords; capture those as expected test data before restoring Stop.
+        $ErrorActionPreference='Continue'
+        $output=& $ps5 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $release 'scripts\repair-gemini.ps1') -BridgeDirectory $fixture 2>&1
+        $ErrorActionPreference=$priorErrorAction
+        Assert ($LASTEXITCODE -ne 0) 'failed helper upgrade is reported'
+    } finally { $global:LASTEXITCODE=$priorExitCode; $ErrorActionPreference=$priorErrorAction }
+    foreach ($file in $before.Keys) { Assert ((Get-FileHash -LiteralPath (Join-Path $fixture $file) -Algorithm SHA256).Hash -ceq $before[$file]) 'failed upgrade restores every original helper' }
+    foreach ($relative in $preservedPaths) { Assert ((Get-FileHash -LiteralPath (Join-Path $fixture $relative) -Algorithm SHA256).Hash -ceq $preservedHashes[$relative]) 'failed upgrade preserves private configuration and binary' }
+    $rolledBack=Get-GeminiBridgeStatus $fixture $testPort
+    Assert ($rolledBack.TaskEnabled -and $rolledBack.TaskActive -and $rolledBack.Listening) 'failed upgrade restores original enabled service'
 }
 function Invoke-RecoveryHelper {
     # Expected failure codes are test data, not the containing CI step's result.
@@ -184,6 +220,7 @@ try {
     Assert ([IO.File]::Exists((Join-Path $fixture 'private\lifecycle.jsonl.1'))) 'oversized lifecycle log rotated'
     Assert (([IO.FileInfo](Join-Path $fixture 'private\lifecycle.jsonl')).Length -lt 65536) 'active lifecycle log bounded after rotation'
     Assert-Repair $true
+    Assert-RepairRollback
     # Reproduce a terminated scheduled parent without a deliberate user stop:
     # the task remains enabled and must be recoverable without rewriting it.
     $task=Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity

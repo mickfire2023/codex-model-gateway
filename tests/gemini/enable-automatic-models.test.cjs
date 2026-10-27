@@ -85,6 +85,18 @@ test('initial proof from another account, missing passing tools, or unmatched ID
   }
 });
 
+test('initial Claude tool-only proof is accepted only with explicit no-reasoning evidence',async t=>{
+  const f=fixture(t),claude='claude-sonnet-5-5-high';
+  f.state.snapshot.provider.models[0].id=claude;f.report.provider=structuredClone(f.state.snapshot.provider);
+  f.report.models=[{id:claude,toolCall:true,toolResult:true,customToolWrapper:true,signatureContinuation:false,signatureCarrier:false,reasoningAbsent:true,toolContinuation:true}];f.saveReport();
+  const result=await enable(f.bridge,f.gateway);assert.equal(result.managedModelCount,1);assert.deepEqual(f.state.configCalls,[{enabled:true,managedModelIds:[claude]}]);
+  for(const kind of ['gemini','unknown_reasoning']){
+    const next=fixture(t);if(kind!=='gemini'){next.state.snapshot.provider.models[0].id=claude;next.report.provider=structuredClone(next.state.snapshot.provider);}
+    next.report.models=[{id:next.state.snapshot.provider.models[0].id,toolCall:true,toolResult:true,customToolWrapper:true,signatureContinuation:false,signatureCarrier:false,toolContinuation:true,...(kind==='gemini'?{reasoningAbsent:true}:{})}];next.saveReport();
+    await assert.rejects(enable(next.bridge,next.gateway));assert.deepEqual(next.state.configCalls,[]);
+  }
+});
+
 test('initial proof cannot certify a model whose capabilities changed after validation',async t=>{
   const f=fixture(t),before=fs.readFileSync(f.settingsPath,'utf8');f.state.snapshot.provider.models[0].contextWindow*=2;
   await assert.rejects(enable(f.bridge,f.gateway));assert.deepEqual(f.state.configCalls,[]);assert.equal(fs.readFileSync(f.settingsPath,'utf8'),before);

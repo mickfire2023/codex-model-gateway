@@ -8,11 +8,13 @@ const {events}=require('../../gateway/gateway.cjs');
 const KEY='synthetic-local-probe-key';
 const IDENTITY='a'.repeat(64);
 const CARRIER='cpa-gemini-responses-carrier-v1:next:function:c3ludGhldGlj';
+const CLAUDE_SIGNATURE='EhgKFggMEAIyEGNsYXVkZS1zeW50aGV0aWMYAQ==';
+const CLAUDE_CARRIER='cpa-gemini-responses-carrier-v1:standalone:text:RWhnS0ZnZ01FQUl5RUdOc1lYVmtaUzF6ZVc1MGFHVjBhV01ZQVE9PQ';
 const PRIVATE='synthetic-openai-private-reasoning-must-not-migrate';
 const PATCH='*** Begin Patch\n*** End Patch';
 const MODEL={id:'gemini-synthetic-high',displayName:'Synthetic Gemini',contextWindow:32768,maxOutputTokens:512,inputModalities:['text'],supportsTools:true,reasoningEfforts:['high'],defaultReasoningEffort:'high',preserveOpaqueReasoning:true};
 
-async function fixture(t,{mode='valid',httpStatus=503}={}){
+async function fixture(t,{mode='valid',httpStatus=503,model=MODEL}={}){
   const observed={requests:[],logs:[],transport:0},intervals=new Set();
   const server=http.createServer(async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);
@@ -27,8 +29,9 @@ async function fixture(t,{mode='valid',httpStatus=503}={}){
     let output,status='completed';
     if(index===1){
       const call={type:'function_call',id:'synthetic-call-item',call_id:'synthetic-call-id',name:mode==='wrong_tool'?'unrelated_function':body.tools[0].name,arguments:mode==='invalid_wrapper'?'{"input":42}':JSON.stringify({input:PATCH}),status:'completed'};
-      const carrier={type:'reasoning',id:'synthetic-carrier',summary:[],encrypted_content:mode==='unsupported_carrier'?'cpa-gemini-responses-carrier-v1:next:function:!!!!':CARRIER};
-      output=mode==='empty'?[]:mode==='missing_carrier'?[call]:[carrier,{type:'reasoning',id:'synthetic-foreign-opaque',summary:[],encrypted_content:PRIVATE},call];
+      const claude=model.id.startsWith('claude-');
+      const carrier={type:'reasoning',id:'synthetic-carrier',summary:claude&&mode!=='empty_claude_summary'?[{type:'summary_text',text:'Synthetic signed thinking.'}]:[],encrypted_content:mode==='unsupported_carrier'?'cpa-gemini-responses-carrier-v1:next:function:!!!!':claude?CLAUDE_CARRIER:CARRIER};
+      output=mode==='empty'?[]:mode==='missing_carrier'?[call]:[carrier,...(!claude||mode==='unsigned_claude_reasoning'?[{type:'reasoning',id:'synthetic-foreign-opaque',summary:[],encrypted_content:PRIVATE}]:[]),call];
       if(mode==='incomplete')status='incomplete';
       if(mode==='duplicate_tools')output.push({...call,id:'synthetic-second-call-item',call_id:'synthetic-second-call-id'});
     }else{
@@ -58,12 +61,12 @@ async function fixture(t,{mode='valid',httpStatus=503}={}){
     readBody:async response=>{const chunks=[];for await(const chunk of response)chunks.push(chunk);return Buffer.concat(chunks);},events,
     log:value=>observed.logs.push(value)
   });
-  return {target,observed,probe:extra=>probe({model:MODEL,target,accountIdentity:IDENTITY,...extra})};
+  return {target,observed,probe:extra=>probe({model,target,accountIdentity:IDENTITY,...extra})};
 }
 
 test('real HTTP/SSE probe completes two native turns, preserving a known Gemini carrier and wrapped tool result',async t=>{
   const f=await fixture(t);assert.equal(Object.keys(f.target).includes('headers'),false);
-  const result=await f.probe();assert.deepEqual(result,{toolCall:true,toolResult:true,signatureCarrier:true});
+  const result=await f.probe();assert.deepEqual(result,{toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier:true,reasoningAbsent:false});
   assert.equal(f.observed.transport,2);assert.equal(f.observed.requests.length,2);
   const [first,next]=f.observed.requests;
   assert.equal(first.body.model,MODEL.id);assert.equal(first.body.tools.length,1);assert.equal(first.body.tools[0].type,'function');
@@ -77,6 +80,30 @@ test('real HTTP/SSE probe completes two native turns, preserving a known Gemini 
   const toolResult=next.body.input.find(item=>item.type==='function_call_output');assert.match(toolResult.output,/Marker: gemini-auto-[a-f0-9]{16}/);
   for(const request of f.observed.requests){assert.equal(request.headers.authorization,'Bearer '+KEY);assert.equal(request.headers.cookie,undefined);assert.equal(request.headers['chatgpt-account-id'],undefined);assert.ok(!request.raw.includes(KEY));assert.ok(!request.raw.includes(IDENTITY));assert.ok(!request.raw.includes('historyScope'));}
   assert.deepEqual(f.observed.logs,[]);assert.ok(!JSON.stringify(result).includes(KEY));assert.ok(!JSON.stringify(result).includes(CARRIER));
+});
+
+test('Claude probe requires signed thinking and unwraps the exact issued CPA carrier only for continuation dispatch',async t=>{
+  const model={...MODEL,id:'claude-sonnet-5-5-high',displayName:'Synthetic Claude'},f=await fixture(t,{model});
+  assert.deepEqual(await f.probe(),{toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier:true,reasoningAbsent:false});assert.equal(f.observed.requests.length,2);
+  const [first,next]=f.observed.requests;assert.equal(first.body.model,model.id);assert.equal(first.body.reasoning.effort,'high');
+  const reasoning=next.body.input.find(item=>item.type==='reasoning');assert.equal(reasoning.encrypted_content,CLAUDE_SIGNATURE);assert.deepEqual(reasoning.summary,[{type:'summary_text',text:'Synthetic signed thinking.'}]);
+  assert.ok(!next.raw.includes(CLAUDE_CARRIER));assert.equal(next.body.input.some(item=>item.encrypted_content===PRIVATE),false);
+});
+
+test('Claude probe rejects a detached carrier without signed thinking before a second generation',async t=>{
+  const f=await fixture(t,{model:{...MODEL,id:'claude-opus-5-5-high'},mode:'empty_claude_summary'});
+  await assert.rejects(f.probe(),{code:'gemini_probe_signature_missing'});assert.equal(f.observed.transport,1);
+});
+
+test('adaptive Claude may complete a tool-only round trip without claiming signed continuation',async t=>{
+  const f=await fixture(t,{model:{...MODEL,id:'claude-sonnet-5-5-high'},mode:'missing_carrier'});
+  assert.deepEqual(await f.probe(),{toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier:false,reasoningAbsent:true});assert.equal(f.observed.transport,2);
+  assert.ok(f.observed.requests.every(request=>!request.body.input.some(item=>item.type==='reasoning')));
+});
+
+test('Claude rejects any unsigned thinking even alongside a valid signed carrier',async t=>{
+  const f=await fixture(t,{model:{...MODEL,id:'claude-opus-5-5-high'},mode:'unsigned_claude_reasoning'});
+  await assert.rejects(f.probe(),{code:'gemini_probe_signature_missing'});assert.equal(f.observed.transport,1);
 });
 for(const mode of ['empty','wrong_tool','duplicate_tools','incomplete'])test('probe rejects '+mode+' tool output before a second generation',async t=>{const f=await fixture(t,{mode});await assert.rejects(f.probe(),error=>error.code==='gemini_probe_tool_incompatible');assert.equal(f.observed.transport,1);assert.equal(f.observed.requests.length,1);assert.deepEqual(f.observed.logs,[]);});
 test('a malformed custom wrapper is rejected without another request',async t=>{const f=await fixture(t,{mode:'invalid_wrapper'});await assert.rejects(f.probe(),error=>error.code==='invalid_tool_call');assert.equal(f.observed.transport,1);});

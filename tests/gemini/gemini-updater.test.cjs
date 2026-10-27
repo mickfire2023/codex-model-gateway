@@ -3,12 +3,13 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
+const crypto=require('node:crypto');
 const {createProviderStore}=require('../../gateway/provider-store.cjs');
-const {createGeminiUpdater,discoverModels,fingerprint}=require('../../gateway/gemini-updater.cjs');
+const {createGeminiUpdater,discoverModels,fingerprint,protocolFingerprint,readCatalogs,account}=require('../../gateway/gemini-updater.cjs');
 const IDENTITY='a'.repeat(64),OLD='gemini-existing-high',NEXT='gemini-next-high',OTHER='gemini-other-high',MANUAL='gemini-manual-high';
 const model=(id,extra={})=>({id,displayName:id,contextWindow:32768,maxOutputTokens:4096,inputModalities:['text'],supportsTools:true,reasoningEfforts:['high'],defaultReasoningEffort:'high',preserveOpaqueReasoning:true,...extra});
-function catalog(ids,{registered=ids,details={}}={}){
-  return {available:{data:ids.map(id=>({id,owned_by:'antigravity'}))},native:{models:ids.map(id=>({name:'models/'+id,inputTokenLimit:32768,outputTokenLimit:4096,supportedInputModalities:['text'],supportedOutputModalities:['text'],...details[id]}))},registered:{models:registered.map(id=>({id}))}};
+function catalog(ids,{registered=ids,details={},thinking={}}={}){
+  return {available:{data:ids.map(id=>({id,owned_by:'antigravity'}))},native:{models:ids.map(id=>({name:'models/'+id,inputTokenLimit:32768,outputTokenLimit:4096,supportedInputModalities:['text'],supportedOutputModalities:['text'],...details[id]}))},registered:{models:registered.map(id=>({id}))},definitions:{channel:'antigravity',models:Object.entries(thinking).map(([id,value])=>({id,thinking:value}))}};
 }
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -115,4 +116,123 @@ test('catalog filtering leaves image or incomplete metadata pending and rejects 
   const found=discoverModels(raw);assert.deepEqual(found.candidates.map(m=>m.id),[OLD]);assert.deepEqual(new Set(found.pending.map(m=>m.id)),new Set([image,missing]));
   raw.available.data.push({...raw.available.data[0]});assert.throws(()=>discoverModels(raw),{code:'gemini_catalog_invalid_models'});
   assert.notEqual(fingerprint(model(OLD)),fingerprint(model(OLD,{supportsTools:false})));assert.notEqual(fingerprint(model(OLD)),fingerprint(model(OLD,{preserveOpaqueReasoning:false})));
+});
+
+test('readCatalogs reads capability definitions locally with management credentials and account fencing',async t=>{
+  const f=await fixture(t),root=path.join(f.directory,'read-only-bridge'),managementKey='1'.repeat(64);
+  fs.mkdirSync(path.join(root,'private/auth'),{recursive:true});
+  fs.writeFileSync(path.join(root,'private/auth/synthetic account.json'),JSON.stringify({type:'antigravity',email:'synthetic@example.invalid',project_id:'synthetic-project'}));
+  fs.writeFileSync(path.join(root,'private/control.json'),JSON.stringify({managementKey}));
+  fs.writeFileSync(path.join(root,'bridge.json'),JSON.stringify({product:'CodexGeminiBridge',port:8317}));
+  const target={baseUrl:'http://127.0.0.1:8317/v1',accountIdentity:account(root).identity,headers:{authorization:'Bearer synthetic-model-key'}},calls=[];
+  const expected=catalog([OLD],{thinking:{[OLD]:{levels:['low','medium','high']}}});
+  const requestJSON=async(url,options)=>{
+    calls.push(url.pathname);assert.equal(url.origin,'http://127.0.0.1:8317');
+    if(url.pathname.startsWith('/v8/management/'))assert.equal(options.headers.authorization,'Bearer '+managementKey);
+    else assert.equal(options.headers.authorization,'Bearer synthetic-model-key');
+    if(url.pathname==='/v1/models')return expected.available;
+    if(url.pathname==='/v1beta/models')return expected.native;
+    if(url.pathname==='/v8/management/credentials/models'){assert.equal(url.searchParams.get('name'),'synthetic account.json');return expected.registered;}
+    assert.equal(url.pathname,'/v8/management/routing/model-definitions/antigravity');return expected.definitions;
+  };
+  assert.deepEqual(await readCatalogs(root,target,{requestJSON}),expected);assert.equal(calls.length,4);
+  await assert.rejects(readCatalogs(root,{...target,accountIdentity:'b'.repeat(64)},{requestJSON}),{code:'gemini_account_changed'});assert.equal(calls.length,4);
+});
+
+test('Gemini declared levels become selectable with high and medium defaults, independently of ID spelling',()=>{
+  const flash='gemini-future-flash',lite='gemini-future-lite';
+  const found=discoverModels(catalog([OLD,flash,lite],{thinking:{[OLD]:{levels:['low','medium','high']},[flash]:{levels:['high','minimal','medium','low']},[lite]:{levels:['minimal','low']}}}));
+  assert.deepEqual(found.candidates.map(m=>m.reasoningEfforts),[['low','medium','high'],['minimal','low','medium','high'],['minimal','low']]);
+  assert.deepEqual(found.candidates.map(m=>m.defaultReasoningEffort),['high','medium','minimal']);
+  assert.ok(found.candidates.every(m=>!m.reasoningEfforts.includes('none')));
+});
+
+test('unknown or malformed thinking declarations retain safe legacy defaults without invented choices',()=>{
+  const plain='gemini-unknown',unknownClaude='claude-unknown';
+  for(const thinking of [undefined,null,{},'invalid',{levels:[]},{levels:['low','ultra']},{levels:['high','high']},{levels:[1]},{levels:'high'}]){
+    const found=discoverModels(catalog([OLD,plain,unknownClaude],{thinking:{[OLD]:thinking,[plain]:thinking,[unknownClaude]:thinking}}));
+    assert.deepEqual(found.candidates.map(m=>m.reasoningEfforts),[['high'],['none'],['none']]);
+  }
+  for(const definitions of [null,{channel:'claude',models:[]},{channel:'antigravity',models:'invalid'},{channel:'antigravity',models:[{id:OLD},{id:OLD}]}])assert.throws(()=>discoverModels({...catalog([OLD]),definitions}),{code:'gemini_catalog_invalid_definitions'});
+});
+
+test('Claude discovery requires the account intersection and native capabilities and preserves literal IDs',()=>{
+  const sonnet='claude-sonnet-5-5-high',opus='claude-opus-5-5-high',foreign='claude-unregistered-high';
+  const raw=catalog([OLD,sonnet,opus,foreign,'gpt-unrelated'],{registered:[OLD,sonnet,opus],thinking:{[sonnet]:{min:1024,max:64000,levels:['low','medium','high']},[opus]:{min:1024,max:64000}},details:{[sonnet]:{inputTokenLimit:1000000,outputTokenLimit:128000,supportedInputModalities:['text','image']},[opus]:{inputTokenLimit:1000000,outputTokenLimit:128000,supportedInputModalities:['text','image']}}});
+  const found=discoverModels(raw);assert.deepEqual(found.candidates.map(m=>m.id),[OLD,sonnet,opus]);
+  for(const entry of found.candidates.slice(1)){assert.equal(entry.contextWindow,1000000);assert.equal(entry.maxOutputTokens,65536);assert.deepEqual(entry.inputModalities,['text','image']);assert.deepEqual(entry.reasoningEfforts,['low','medium','high']);assert.equal(entry.defaultReasoningEffort,'medium');assert.equal(entry.preserveOpaqueReasoning,true);}
+  assert.equal(found.candidates[1].displayName,'Claude Sonnet 5.5');assert.equal(found.candidates[2].displayName,'Claude Opus 5.5');
+  raw.available.data[1].owned_by='foreign-provider';assert.throws(()=>discoverModels(raw),{code:'gemini_catalog_invalid_models'});
+});
+
+test('only verified Claude 5.5 IDs with a sufficient declared budget range expose three effort levels',()=>{
+  const sonnet='claude-sonnet-5-5-high',opus='claude-opus-5-5-high',unknown='claude-future-high';
+  const budgets=[{min:1024,max:64000},{min:0,max:24576}];
+  for(const thinking of budgets){
+    const found=discoverModels(catalog([sonnet,opus,unknown],{thinking:{[sonnet]:thinking,[opus]:thinking,[unknown]:thinking}}));
+    assert.deepEqual(found.candidates.map(m=>m.id),[sonnet,opus,unknown]);
+    assert.deepEqual(found.candidates.map(m=>m.reasoningEfforts),[['low','medium','high'],['low','medium','high'],['high']]);
+    assert.deepEqual(found.candidates.map(m=>m.defaultReasoningEffort),['medium','medium','high']);
+    assert.ok(found.candidates.every(m=>!m.reasoningEfforts.includes('minimal')&&!m.reasoningEfforts.includes('none')));
+  }
+  for(const thinking of [undefined,null,{}, {min:2048,max:64000},{min:1024,max:24575},{min:-1,max:64000},{min:1024.5,max:64000},{min:1024,max:Infinity},{min:'1024',max:64000},{min:1024,max:'64000'},{levels:['low','medium','high']}]){
+    const found=discoverModels(catalog([sonnet,opus],{thinking:{[sonnet]:thinking,[opus]:thinking}}));
+    assert.deepEqual(found.candidates.map(m=>m.reasoningEfforts),[['high'],['high']]);
+    assert.deepEqual(found.candidates.map(m=>m.defaultReasoningEffort),['high','high']);
+  }
+});
+
+test('cached account-bound protocol proof migrates across reasoning-only updates without another generation',async t=>{
+  const f=await fixture(t);await f.updater.refresh();f.updater.close();
+  const stateFile=path.join(f.directory,'private/gemini-model-sync.json'),saved=JSON.parse(fs.readFileSync(stateFile,'utf8'));
+  const key=crypto.createHash('sha256').update(JSON.stringify([IDENTITY,fingerprint(model(OLD))])).digest('hex');
+  const checkedAt='2026-10-25T10:00:00Z';saved.verified={[key]:{checkedAt,source:'tool_round_trip'}};fs.writeFileSync(stateFile,JSON.stringify(saved));
+  f.env.raw=catalog([OLD],{thinking:{[OLD]:{levels:['low','medium','high']}}});
+  const before=f.snapshot(),scope=f.providers.routeBySlug(before.provider.models[0].slug).historyScope,keys=f.counts.keyWrites;
+  const reloaded=createGeminiUpdater(f.settings);t.after(()=>reloaded.close());const result=await reloaded.refresh();
+  assert.equal(result.state,'ok');assert.equal(f.counts.probe,0);assert.equal(f.counts.generatedRequests,0);assert.equal(f.counts.keyWrites,keys);
+  const updated=f.snapshot().provider.models[0];assert.deepEqual(updated.reasoningEfforts,['low','medium','high']);assert.equal(updated.defaultReasoningEffort,'high');assert.equal(f.providers.routeBySlug(updated.slug).historyScope,scope);
+  assert.equal(protocolFingerprint(before.provider.models[0]),protocolFingerprint(updated));assert.notEqual(fingerprint(before.provider.models[0]),fingerprint(updated));
+  const migrated=Object.values(JSON.parse(fs.readFileSync(stateFile,'utf8')).verified).find(proof=>proof.source==='reasoning_metadata_update');assert.equal(migrated.checkedAt,checkedAt);
+  await reloaded.refresh();assert.equal(f.counts.probe,0);
+});
+
+test('another account proof cannot approve new capability choices or a new Claude model',async t=>{
+  const f=await fixture(t);f.updater.close();const key=crypto.createHash('sha256').update(JSON.stringify(['b'.repeat(64),fingerprint(model(OLD))])).digest('hex');
+  fs.mkdirSync(path.join(f.directory,'private'),{recursive:true});fs.writeFileSync(path.join(f.directory,'private/gemini-model-sync.json'),JSON.stringify({version:1,adapter:'gemini-signed-responses-v1',verified:{[key]:{checkedAt:'2026-10-25T10:00:00Z',source:'tool_round_trip'}},failed:{},missing:{}}));
+  const claude='claude-sonnet-5-5-high';f.env.raw=catalog([OLD,claude],{thinking:{[OLD]:{levels:['low','medium','high']}}});f.env.probe=async()=>{throw Object.assign(new Error('Synthetic protocol validation unavailable'),{status:400});};
+  const reloaded=createGeminiUpdater(f.settings);t.after(()=>reloaded.close());const result=await reloaded.refresh();assert.equal(f.counts.probe,2);assert.deepEqual(f.snapshot().provider.models.map(m=>m.id),[OLD]);assert.deepEqual(f.snapshot().provider.models[0].reasoningEfforts,['high']);assert.ok(result.pending.some(p=>p.id===claude));
+});
+
+test('verified Claude proof survives a three-level metadata update without rotating credentials or claiming signed thinking',async t=>{
+  const f=await fixture(t),claude='claude-opus-5-5-high';
+  f.env.raw=catalog([OLD,claude]);
+  f.env.probe=async()=>({toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier:false,reasoningAbsent:true});
+  await f.updater.refresh();f.updater.close();
+  const previous=f.snapshot().provider.models.find(m=>m.id===claude),scope=f.providers.routeBySlug(previous.slug).historyScope,keys=f.counts.keyWrites,probes=f.counts.probe;
+  assert.deepEqual(previous.reasoningEfforts,['high']);
+  f.env.raw=catalog([OLD,claude],{thinking:{[claude]:{min:1024,max:64000}}});
+  f.env.probe=async()=>{throw new Error('No generation is needed for an already verified transport.');};
+  const reloaded=createGeminiUpdater(f.settings);t.after(()=>reloaded.close());
+  const result=await reloaded.refresh(),updated=f.snapshot().provider.models.find(m=>m.id===claude);
+  assert.equal(result.state,'ok');assert.equal(f.counts.probe,probes);assert.equal(f.counts.keyWrites,keys);
+  assert.deepEqual(updated.reasoningEfforts,['low','medium','high']);assert.equal(updated.defaultReasoningEffort,'medium');
+  assert.equal(f.providers.routeBySlug(updated.slug).historyScope,scope);
+  const proofs=Object.values(JSON.parse(fs.readFileSync(path.join(f.directory,'private/gemini-model-sync.json'),'utf8')).verified);
+  const migrated=proofs.find(proof=>proof.source==='reasoning_metadata_update');
+  assert.equal(migrated.signatureCarrier,false);assert.equal(migrated.reasoningAbsent,true);assert.equal(migrated.toolContinuation,true);
+});
+
+test('new Claude models require one successful signed tool round trip and respect manual exclusions',async t=>{
+  const f=await fixture(t),claude='claude-sonnet-5-5-high';f.env.raw=catalog([OLD,claude]);await f.updater.refresh();assert.equal(f.counts.probe,1);assert.ok(f.snapshot().provider.models.some(m=>m.id===claude));
+  await f.providers.removeModel('gemini-subscription',claude);await f.updater.refresh();assert.equal(f.counts.probe,1);assert.ok(!f.snapshot().provider.models.some(m=>m.id===claude));assert.ok(f.snapshot().excludedModelIds.includes(claude));
+});
+
+test('tool-only Claude proof records no issued reasoning and never claims signature validation',async t=>{
+  const f=await fixture(t),claude='claude-sonnet-5-5-high';f.env.raw=catalog([OLD,claude]);
+  f.env.probe=async()=>({toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier:false,reasoningAbsent:true});
+  await f.updater.refresh();assert.ok(f.snapshot().provider.models.some(m=>m.id===claude));
+  const proofs=()=>Object.values(JSON.parse(fs.readFileSync(path.join(f.directory,'private/gemini-model-sync.json'),'utf8')).verified);
+  const proof=proofs().find(row=>row.source==='tool_continuation_without_reasoning');assert.ok(proof);assert.equal(proof.signatureCarrier,false);assert.equal(proof.reasoningAbsent,true);assert.equal(proof.toolContinuation,true);
+  await f.updater.refresh();assert.equal(f.counts.probe,1);assert.ok(proofs().some(row=>row.source==='tool_continuation_without_reasoning'&&row.signatureCarrier===false));
 });
