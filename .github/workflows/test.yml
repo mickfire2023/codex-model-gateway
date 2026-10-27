@@ -21,4 +21,6 @@ jobs:
           & .\tests\distribution\install.test.ps1
           & .\tests\distribution\chrome-install.test.ps1
           & .\tests\gateway\lifecycle-scheduled.test.ps1
+          & .\tests\gateway\scheduler-registry.test.ps1
           & .\tests\gemini\lifecycle.test.ps1
+          & .\tests\gemini\binary-upgrade.test.ps1
