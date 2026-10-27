@@ -15,6 +15,8 @@ const CREDENTIAL_REF = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const EFFORTS = new Set(['none','minimal','low','medium','high','xhigh','max','ultra']);
 const MAX_MODELS_BYTES = 2 * 1024 * 1024;
 const clone = value => structuredClone(value);
+// Keep the registered provider identity and saved name stable across upgrades.
+const providerDisplayName = provider => provider.id === 'gemini-subscription' && provider.name === 'Gemini 订阅' ? 'Antigravity 订阅' : provider.name;
 
 function failure(message, code, status = 400) {
   return Object.assign(new Error(message), {code, status});
@@ -261,7 +263,7 @@ function createProviderStore(options = {}) {
   }
   function publicProvider(provider, keyConfigured = !!keys.get(provider.id)) {
     return {
-      id:provider.id, name:provider.name, baseUrl:provider.baseUrl, protocol:provider.protocol,
+      id:provider.id, name:provider.name, displayName:providerDisplayName(provider), baseUrl:provider.baseUrl, protocol:provider.protocol,
       ...(provider.opaqueReasoningIdentity ? {opaqueReasoningIdentity:provider.opaqueReasoningIdentity} : {}),
       ...(provider.autoDiscovery ? {autoDiscovery:clone(provider.autoDiscovery)} : {}),
       keyConfigured,
@@ -487,7 +489,7 @@ function createProviderStore(options = {}) {
     // provenance scope. The account fingerprint represents the single account
     // pinned by the local OAuth proxy; re-register it after switching accounts.
     const historyScope = preserveOpaqueReasoning ? createHash('sha256').update(JSON.stringify([provider.id,provider.baseUrl,model.id,provider.credentialRef,provider.opaqueReasoningIdentity])).digest('hex') : undefined;
-    return {slug, providerId:provider.id, providerName:provider.name, baseUrl:provider.baseUrl, protocol:provider.protocol, modelId:model.id, model:clone(model), keyConfigured:!!keys.get(provider.id),
+    return {slug, providerId:provider.id, providerName:providerDisplayName(provider), baseUrl:provider.baseUrl, protocol:provider.protocol, modelId:model.id, model:clone(model), keyConfigured:!!keys.get(provider.id),
       ...(preserveOpaqueReasoning ? {preserveOpaqueReasoning:true,historyScope} : {})};
   }
   function upstreamForSlug(slug) {
@@ -507,13 +509,14 @@ function createProviderStore(options = {}) {
   }
   function catalogModels() {
     return providers.flatMap((provider, providerIndex)=>provider.models.map((model, modelIndex)=>{
+      const name = providerDisplayName(provider);
       const instructions = template.model_messages ? {model_messages:clone(template.model_messages)} : {};
       if (typeof template.base_instructions === 'string') instructions.base_instructions = template.base_instructions;
       return {
         ...instructions,
-        slug:makeModelSlug(provider.id, model.id), display_name:`${model.displayName} · ${provider.name}`,
-        description:`${provider.name} · ${model.id}（用户配置能力；仅已检查模型列表）`,
-        provider_id:provider.id, provider_name:provider.name,
+        slug:makeModelSlug(provider.id, model.id), display_name:`${model.displayName} · ${name}`,
+        description:`${name} · ${model.id}（用户配置能力；仅已检查模型列表）`,
+        provider_id:provider.id, provider_name:name,
         prefer_websockets:false, support_verbosity:false, default_verbosity:null,
         apply_patch_tool_type:'freeform', web_search_tool_type:'text',
         input_modalities:clone(model.inputModalities), supports_image_detail_original:false,

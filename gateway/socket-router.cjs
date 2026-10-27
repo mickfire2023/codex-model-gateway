@@ -1,7 +1,7 @@
 'use strict';
 
 const {createHmac, randomBytes, randomUUID} = require('node:crypto');
-const {isGeminiReasoningCarrier} = require('./deepseek-adapter.cjs');
+const {isGeminiReasoningCarrier,isAntigravityClaudeReasoningCarrier,opaqueReasoningKey} = require('./reasoning-carriers.cjs');
 
 const TERMINAL = new Set(['response.completed', 'response.incomplete', 'response.failed', 'response.cancelled']);
 const MIGRATABLE = new Set(['message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'compaction_trigger']);
@@ -56,6 +56,9 @@ function portableInput(input, destination, trustedOpaque = () => false) {
   return input.flatMap(item => {
     if (item?.type !== 'reasoning' || !item.encrypted_content) return [item];
     if (isGeminiReasoningCarrier(item) && trustedOpaque(item)) return [item];
+    // Keep the signature and its thinking text together. Removing the marker
+    // first would make a later adapter mistake Claude content for portable text.
+    if (isAntigravityClaudeReasoningCarrier(item)) return [];
     // Private encrypted reasoning is not user-visible conversational context.
     // Never decrypt or invent it, and never send an OpenAI blob to another provider.
     if (!item.content?.length && !item.summary?.length) return [];
@@ -124,7 +127,7 @@ function createHistoryStore(options = {}) {
     const knownCarriers = new Set();
     if (opaqueReasoningScope && !foreign) for (const [key, entry] of entries) {
       if (!key.startsWith(ns + ':') || entry.provider !== context.provider || entry.opaqueReasoningScope !== opaqueReasoningScope) continue;
-      for (const item of entry.input) if (isGeminiReasoningCarrier(item)) knownCarriers.add(item.encrypted_content);
+      for (const item of entry.input) if (isGeminiReasoningCarrier(item)) knownCarriers.add(opaqueReasoningKey(item));
     }
     const replay = Boolean(context.forceReplay || foreign || (context.provider && !isGpt(context.provider)));
     let complete = true;
@@ -139,7 +142,7 @@ function createHistoryStore(options = {}) {
       // Validate the raw transcript before rebuilding input objects: otherwise a
       // foreign message's program marker could disappear during normalization.
       assertMigratable(request, fullInput);
-      fullInput = portableInput(fullInput, context.provider, item=>knownCarriers.has(item.encrypted_content));
+      fullInput = portableInput(fullInput, context.provider, item=>knownCarriers.has(opaqueReasoningKey(item)));
       assertMigratable(request, fullInput);
     }
     // A client may replay a full transcript on its first GPT connection. Remove

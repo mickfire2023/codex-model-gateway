@@ -26,7 +26,7 @@ function renderManagement(options = {}) {
     if (model && typeof model.slug === 'string' && !['hide','hidden'].includes(model.visibility)) modelMap.set(model.slug,model);
   }
   for (const provider of providers) for (const model of list(provider.models)) {
-    if (typeof model.slug === 'string' && !modelMap.has(model.slug)) modelMap.set(model.slug,{slug:model.slug,display_name:`${model.displayName || model.id} · ${provider.name}`});
+    if (typeof model.slug === 'string' && !modelMap.has(model.slug)) modelMap.set(model.slug,{slug:model.slug,display_name:`${model.displayName || model.id} · ${provider.displayName || provider.name}`});
   }
   const models = [...modelMap.values()];
   const official = models.filter(model=>!model.slug.startsWith('custom/'));
@@ -75,7 +75,7 @@ function renderManagement(options = {}) {
   function providerCard(provider) {
     const items = list(provider.models);
     const draft = providerDraft?.id === provider.id ? providerDraft : null;
-    return `<article class="provider-card"><div class="section-heading"><div><h3>${escape(provider.name)}</h3><p class="subtle break">${escape(provider.baseUrl)}</p></div><span class="badge ${provider.keyConfigured ? 'ok' : 'warn'}">${provider.keyConfigured ? '密钥已保存' : '需要设置密钥'}</span></div>
+    return `<article class="provider-card"><div class="section-heading"><div><h3>${escape(provider.displayName || provider.name)}</h3><p class="subtle break">${escape(provider.baseUrl)}</p></div><span class="badge ${provider.keyConfigured ? 'ok' : 'warn'}">${provider.keyConfigured ? '密钥已保存' : '需要设置密钥'}</span></div>
       <p class="hint">${provider.protocol === 'chat_completions' ? 'Chat Completions' : 'Responses'} · ${provider.validation?.modelsEndpointVerified ? `模型列表已检查：${escape(localTime(provider.validation.modelsCheckedAt))}` : '尚无模型列表检查记录'}</p>
       ${items.length ? `<ul class="model-list">${items.map(model=>`<li><div><strong>${escape(model.displayName || model.id)}</strong><span class="model-id break">${escape(model.id)}</span><small>上下文 ${number(model.contextWindow)} · 最大输出 ${number(model.maxOutputTokens)} · ${list(model.inputModalities).includes('image') ? '文本与图像' : '文本'} · ${model.supportsTools ? '声明支持工具' : '不支持工具'}</small></div><form method="post" action="${url('provider-remove-model')}">${token('provider-remove-model')}${hidden('id',provider.id)}${hidden('modelId',model.id)}${button('移除模型','provider-remove-model','quiet danger-text')}</form></li>`).join('')}</ul>` : '<p class="empty">尚未添加模型。连接已保留，可在下方添加。</p>'}
       <details${draft ? ' open' : ''}><summary>编辑连接或添加模型</summary>${providerForm(provider,draft)}</details>
@@ -115,14 +115,14 @@ function renderManagement(options = {}) {
     const reason = item => reasons[item?.reason] || item?.reason || '等待兼容性验证';
     const refreshToken = controlCsrf['gemini-refresh'];
     const toggleToken = controlCsrf['gemini-toggle'];
-    return `<section id="gemini-auto-update"><div class="section-heading"><div><p class="eyebrow">订阅模型</p><h2>Gemini 自动更新</h2></div><span class="badge ${healthy ? 'ok' : degraded || !enabled || state.state === 'paused' ? 'warn' : ''}" role="status">${current}</span></div>
+    return `<section id="gemini-auto-update"><div class="section-heading"><div><p class="eyebrow">订阅模型</p><h2>Antigravity 自动更新</h2></div><span class="badge ${healthy ? 'ok' : degraded || !enabled || state.state === 'paused' ? 'warn' : ''}" role="status">${current}</span></div>
       ${service ? `<p class="notice${service.state === 'unavailable' ? ' error' : service.state === 'ready' ? ' success' : ''}" role="status"><strong>本机连接组件：</strong>${escape(service.message)}</p>` : ''}
-      <p class="hint">每 ${number(minutes)} 分钟检查当前 Google 账号可用的型号与接入资料。新型号通过兼容性验证后，自动加入模型选择器。</p>
+      <p class="hint">每 ${number(minutes)} 分钟检查当前 Google 账号可用的型号与接入资料。Gemini 和 Claude 新型号通过兼容性验证后，自动加入模型选择器。</p>
       ${state.message ? `<p class="notice${degraded ? ' error' : ''}">${escape(state.message)}</p>` : ''}
       ${degraded ? '<p class="notice">部分检查暂时无法完成，已保留上次可用模型列表；待连接或资料恢复后继续检查。</p>' : ''}
-      <dl class="compact"><div><dt>最近检查</dt><dd>${escape(localTime(state.lastCheckedAt))}</dd></div><div><dt>上次成功</dt><dd>${escape(localTime(state.lastSuccessAt))}</dd></div><div><dt>下次检查</dt><dd>${enabled ? escape(localTime(state.nextCheckAt)) : '暂停期间不检查'}</dd></div><div><dt>当前 Gemini 模型</dt><dd>${number(state.modelCount)} 个</dd></div></dl>
+      <dl class="compact"><div><dt>最近检查</dt><dd>${escape(localTime(state.lastCheckedAt))}</dd></div><div><dt>上次成功</dt><dd>${escape(localTime(state.lastSuccessAt))}</dd></div><div><dt>下次检查</dt><dd>${enabled ? escape(localTime(state.nextCheckAt)) : '暂停期间不检查'}</dd></div><div><dt>当前订阅模型</dt><dd>${number(state.modelCount)} 个</dd></div></dl>
       ${pending.length ? `<details open><summary>${number(pending.length)} 个型号待处理</summary><ul class="check-results">${pending.slice(0,20).map(item=>`<li><span class="result-dot pending" aria-label="待处理"></span><div class="break"><strong>${escape(typeof item === 'string' ? item : item.id || '新型号')}</strong><p>${escape(typeof item === 'string' ? '等待兼容性验证' : reason(item))}</p>${item?.nextProbeAt ? `<small>下次验证：${escape(localTime(item.nextProbeAt))}</small>` : ''}</div></li>`).join('')}</ul>${pending.length > 20 ? `<p class="hint">另有 ${number(pending.length-20)} 个型号等待处理。</p>` : ''}</details>` : ''}
-      <div class="actions"><form method="post" action="${url('gemini-refresh')}">${token('gemini-refresh')}<button type="submit" class="secondary"${refreshToken && enabled && !busy ? '' : ' disabled'}>立即检查 Gemini</button></form><form method="post" action="${url('gemini-toggle')}">${token('gemini-toggle')}${hidden('enabled',enabled ? 'false' : 'true')}<button type="submit" class="secondary"${toggleToken ? '' : ' disabled'}>${enabled ? '暂停自动更新' : '开启自动更新'}</button></form></div>
+      <div class="actions"><form method="post" action="${url('gemini-refresh')}">${token('gemini-refresh')}<button type="submit" class="secondary"${refreshToken && enabled && !busy ? '' : ' disabled'}>立即检查订阅模型</button></form><form method="post" action="${url('gemini-toggle')}">${token('gemini-toggle')}${hidden('enabled',enabled ? 'false' : 'true')}<button type="submit" class="secondary"${toggleToken ? '' : ' disabled'}>${enabled ? '暂停自动更新' : '开启自动更新'}</button></form></div>
       <p class="hint">目录检查不生成回复。新发现或能力变化的型号，首次会用最多两轮模拟工具请求验证，使用少量订阅额度，不执行文件修改。暂停会保留当前可用模型，你手动移除的型号不会自动加回。</p>
       <p class="hint">Google 账号权限与上游资料各有刷新周期，新型号不会在发布时立即出现。更新完成后，重新打开 Codex 模型选择器即可查看。</p></section>`;
   }

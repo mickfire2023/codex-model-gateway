@@ -163,13 +163,13 @@ function createGateway(settings, options = {}) {
       geminiUpdater=require('./gemini-updater.cjs').createGeminiUpdater({directory:dir,bridgeDirectory:settings.geminiSubscription.bridgeDirectory,intervalMs:settings.geminiSubscription.intervalMs||1800000,providers,requestUpstream,readBody,events,log,onUpdate:refreshLocal});
     }catch{
       log({event:'gemini_catalog_check_failed',code:'gemini_sync_initialization_failed'});
-      geminiUpdater={status:()=>({configured:true,enabled:false,busy:false,state:'degraded',errorCode:'gemini_sync_initialization_failed',message:'Gemini 自动更新组件未能初始化，原有模型列表保留。'}),assertRoute:()=>{throw Object.assign(new Error('Gemini 登录组件不可用，请在管理页检查。'),{status:503,code:'gemini_sync_initialization_failed'});}};
+      geminiUpdater={status:()=>({configured:true,enabled:false,busy:false,state:'degraded',errorCode:'gemini_sync_initialization_failed',message:'Antigravity 自动更新组件未能初始化，原有模型列表保留。'}),assertRoute:()=>{throw Object.assign(new Error('Antigravity 登录组件不可用，请在管理页检查。'),{status:503,code:'gemini_sync_initialization_failed'});}};
     }
   }
   let geminiService=options.geminiService||null;
   if(!geminiService&&settings.geminiSubscription?.enabled&&!settings.stagingValidation){
     try{geminiService=require('./gemini-service.cjs').createGeminiService({directory:settings.geminiSubscription.bridgeDirectory,log});}
-    catch{geminiService={ensure:async()=>{throw Object.assign(new Error('Gemini 本机组件安装信息无效，请修复组件安装。'),{status:503,code:'gemini_service_invalid'});},status:()=>({state:'unavailable',errorCode:'gemini_service_invalid',message:'Gemini 本机组件安装信息无效，请修复组件安装。'})};}
+    catch{geminiService={ensure:async()=>{throw Object.assign(new Error('Antigravity 本机组件安装信息无效，请修复组件安装。'),{status:503,code:'gemini_service_invalid'});},status:()=>({state:'unavailable',errorCode:'gemini_service_invalid',message:'Antigravity 本机组件安装信息无效，请修复组件安装。'})};}
   }
   function routeFor(model) {
     const custom=providers.routeBySlug(model);
@@ -287,9 +287,9 @@ function createGateway(settings, options = {}) {
     try {
       url=new URL(req.url,'http://127.0.0.1');
       if(!allowed(req))return json(res,403,{error:{message:'Local gateway access denied'}});
-      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.5.1',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
+      if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,service:'codex-local-model-gateway',build:'2.6.0',pid:process.pid,directory:dir,startupMode:settings.lifecycle?.startupMode||'process'});
       if(!url.pathname.startsWith(root+'/'))return json(res,404,{error:{message:'Not found'}});
-      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.5.1',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,geminiService:geminiService?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
+      if(req.method==='GET'&&url.pathname===root+'/status')return json(res,200,{...stats,build:'2.6.0',startupMode:settings.lifecycle?.startupMode||'process',deepseekKeyConfigured:!!key,validation,diagnostics:{...diagnostics,control:currentControl()},providers:providers.listProviders(),modelSync:updater?.status()||null,geminiSync:geminiUpdater?.status()||null,geminiService:geminiService?.status()||null,models:catalog.models.filter(m=>m.visibility==='list').map(m=>({id:m.slug,name:m.display_name}))});
       if(req.method==='GET'&&url.pathname===root+'/')return page(res);
       if(req.method==='POST'&&url.pathname.startsWith(root+'/settings/')) {
         const action=url.pathname.slice((root+'/settings/').length);
@@ -309,16 +309,16 @@ function createGateway(settings, options = {}) {
           }
           if(action==='refresh') {if(!updater)throw Object.assign(new Error('当前未启用自动更新。'),{status:409,code:'catalog_sync_disabled'});await updater.refresh({force:true});return redirect(res,'已完成模型目录检查；暂时失败的来源保留上次可用列表。');}
           if(action==='gemini-refresh') {
-            if(!geminiUpdater?.refresh)throw Object.assign(new Error('当前未配置 Gemini 自动更新。'),{status:409,code:'gemini_sync_disabled'});
-            if(!geminiUpdater.status().enabled)throw Object.assign(new Error('Gemini 自动更新已暂停，请先开启。'),{status:409,code:'gemini_sync_paused'});
+            if(!geminiUpdater?.refresh)throw Object.assign(new Error('当前未配置 Antigravity 自动更新。'),{status:409,code:'gemini_sync_disabled'});
+            if(!geminiUpdater.status().enabled)throw Object.assign(new Error('Antigravity 自动更新已暂停，请先开启。'),{status:409,code:'gemini_sync_paused'});
             geminiUpdater.refresh().catch(()=>{});
-            return redirect(res,'已开始检查 Gemini 模型。新发现或能力变化的型号会用少量订阅额度验证工具调用，请稍后刷新查看结果。','info');
+            return redirect(res,'已开始检查 Antigravity 模型。新发现或能力变化的型号会用少量订阅额度验证工具调用，请稍后刷新查看结果。','info');
           }
           if(action==='gemini-toggle') {
-            if(!geminiUpdater?.setEnabled)throw Object.assign(new Error('当前未配置 Gemini 自动更新。'),{status:409,code:'gemini_sync_disabled'});
+            if(!geminiUpdater?.setEnabled)throw Object.assign(new Error('当前未配置 Antigravity 自动更新。'),{status:409,code:'gemini_sync_disabled'});
             if(form.getAll('enabled').length!==1||!['true','false'].includes(form.get('enabled')))throw Object.assign(new Error('请选择开启或暂停自动更新。'),{status:400,code:'gemini_sync_setting_invalid'});
             const enabled=form.get('enabled')==='true';await geminiUpdater.setEnabled(enabled);
-            return redirect(res,enabled?'Gemini 自动更新已开启。新型号验证会使用少量订阅额度。':'Gemini 自动更新已暂停，当前可用模型保留。');
+            return redirect(res,enabled?'Antigravity 自动更新已开启。新型号验证会使用少量订阅额度。':'Antigravity 自动更新已暂停，当前可用模型保留。');
           }
           if(action==='diagnose') {const ok=await diagnose();return redirect(res,ok?'连接检查通过。':'连接检查完成，请查看下方需要处理的项目。',ok?'success':'warning');}
           if(action==='provider-save') {await providers.saveProvider(providerInput(form));refreshLocal();return redirect(res,'服务商与模型列表已验证并保存。可使用下方试用检查实际回复。');}

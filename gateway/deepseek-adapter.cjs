@@ -1,12 +1,6 @@
 'use strict';
 const {createHash} = require('node:crypto');
-
-// CLIProxyAPI's Gemini Responses translator carries Google part signatures in
-// explicitly marked reasoning items. Never preserve arbitrary OpenAI blobs.
-function isGeminiReasoningCarrier(item) {
-  return item?.type === 'reasoning' && typeof item.encrypted_content === 'string' && item.encrypted_content.length <= 1024*1024 &&
-    /^cpa-gemini-responses-carrier-v1:(?:next|previous|standalone):(?:function|text|any):[A-Za-z0-9+/]+$/.test(item.encrypted_content);
-}
+const {ANTIGRAVITY_CLAUDE_REASONING_FORMAT,isGeminiReasoningCarrier,isAntigravityClaudeReasoningCarrier,decodeAntigravityClaudeReasoningCarrier}=require('./reasoning-carriers.cjs');
 
 function createAdapter(request, options = {}) {
   const body = structuredClone(request);
@@ -50,6 +44,11 @@ function createAdapter(request, options = {}) {
       error.status = 400; error.code = 'incompatible_compacted_history'; throw error;
     }
     if (item.type === 'reasoning') {
+      if(options.opaqueReasoningFormat===ANTIGRAVITY_CLAUDE_REASONING_FORMAT){
+        const signature=options.preserveOpaqueReasoning===true?decodeAntigravityClaudeReasoningCarrier(item):undefined;
+        return signature===undefined?[]:[{...result,encrypted_content:signature}];
+      }
+      if(isAntigravityClaudeReasoningCarrier(item))return [];
       if (options.preserveOpaqueReasoning === true && isGeminiReasoningCarrier(item)) return [result];
       delete result.encrypted_content; delete result.summary;
       if (!result.content?.length) return [];
@@ -140,4 +139,4 @@ function createAdapter(request, options = {}) {
   }
   return {body, restoreItem, restoreEvent, restoreResponse: response => ({...response,output:response.output?.map(item=>restoreItem(item,response.status==='completed'))})};
 }
-module.exports = {createAdapter, isGeminiReasoningCarrier};
+module.exports = {createAdapter, isGeminiReasoningCarrier, isAntigravityClaudeReasoningCarrier, decodeAntigravityClaudeReasoningCarrier};

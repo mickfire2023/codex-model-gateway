@@ -67,10 +67,12 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
       }
       if (!capabilities.inputModalities.includes('image') && JSON.stringify(body.input||[]).includes('"type":"input_image"')) throw fail('该模型配置为仅支持文本，请切换支持图片的模型或移除图片。','unsupported_image_input');
       if (!capabilities.supportsTools) { delete body.tools; delete body.tool_choice; delete body.parallel_tool_calls; }
-      if (body.reasoning) {
-        const effort=capabilities.reasoningEfforts.includes(body.reasoning.effort)?body.reasoning.effort:capabilities.defaultReasoningEffort;
+      if (body.reasoning || target.providerId==='gemini-subscription') {
+        const effort=capabilities.reasoningEfforts.includes(body.reasoning?.effort)?body.reasoning.effort:capabilities.defaultReasoningEffort;
         body.reasoning={effort};
-        if (effort==='none') delete body.reasoning;
+        // Antigravity distinguishes an explicit setting from its upstream
+        // default. Keep only levels that the registered model advertises.
+        if (effort==='none'&&target.providerId!=='gemini-subscription') delete body.reasoning;
       }
       if (body.max_output_tokens) body.max_output_tokens=Math.min(body.max_output_tokens,capabilities.maxOutputTokens);
       else body.max_output_tokens=capabilities.maxOutputTokens;
@@ -78,7 +80,8 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
       if (chat) { const prepared=prepareChatRequest(body); adapter=prepared.adapter; body=prepared.payload; }
       else {
         const preserveOpaqueReasoning = target.preserveOpaqueReasoning === true && typeof historyScope === 'string' && historyScope === target.historyScope;
-        adapter=createAdapter(body,{preserveApplyPatch:false,normalizeReasoning:false,strictCustomWrappers:true,maxNameLength:64,preserveOpaqueReasoning}); body=adapter.body;
+        const opaqueReasoningFormat=target.providerId==='gemini-subscription'&&/^claude-/.test(target.modelId)?'antigravity-claude-responses-v1':undefined;
+        adapter=createAdapter(body,{preserveApplyPatch:false,normalizeReasoning:false,strictCustomWrappers:true,maxNameLength:64,preserveOpaqueReasoning,opaqueReasoningFormat}); body=adapter.body;
       }
     }
     // stream_id belongs to the gateway's local WebSocket lane, not the HTTP API.
@@ -90,7 +93,7 @@ function createProviderRunner({providers,deepseekBase,getDeepseekKey,secret,requ
     let upstream;
     try{upstream=await requestUpstream(target.url,{method:'POST',headers:{...target.headers,'content-length':payload.length},signal},payload);}
     catch(error){
-      if(target.providerId==='gemini-subscription'&&error.code==='ECONNREFUSED')throw Object.assign(fail('Gemini 本机组件连接中断；正在检查组件状态，请稍后重试。本次模型请求不会自动重发。','gemini_service_connection_lost',503),{retryAfterSeconds:10});
+      if(target.providerId==='gemini-subscription'&&error.code==='ECONNREFUSED')throw Object.assign(fail('Antigravity 本机组件连接中断；正在检查组件状态，请稍后重试。本次模型请求不会自动重发。','gemini_service_connection_lost',503),{retryAfterSeconds:10});
       throw error;
     }
     if (!(upstream.statusCode>=200&&upstream.statusCode<300)) await upstreamError(upstream,provider==='deepseek'?'deepseek':'provider',target.providerId==='gemini-subscription');

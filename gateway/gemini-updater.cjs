@@ -5,16 +5,19 @@ const http=require('node:http');
 const crypto=require('node:crypto');
 const {createProviderRunner}=require('./provider-runner.cjs');
 const {createHistoryStore}=require('./socket-router.cjs');
-const {isGeminiReasoningCarrier}=require('./deepseek-adapter.cjs');
+const {isGeminiReasoningCarrier,decodeAntigravityClaudeReasoningCarrier}=require('./deepseek-adapter.cjs');
 
 const PROVIDER='gemini-subscription';
 const ADAPTER='gemini-signed-responses-v1';
-const ID=/^gemini-[A-Za-z0-9._/-]{1,190}$/;
+const ID=/^(?:gemini|claude)-[A-Za-z0-9._/-]{1,190}$/;
+const GEMINI_EFFORTS=new Set(['minimal','low','medium','high']);
 const clone=value=>structuredClone(value);
 const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail=(code,status=503)=>Object.assign(new Error(code),{code,status});
 const stamp=now=>new Date(now()).toISOString();
 function fingerprint(model){return hash([ADAPTER,model.id,model.contextWindow,model.maxOutputTokens,model.inputModalities,model.reasoningEfforts,model.defaultReasoningEffort,model.supportsTools,model.preserveOpaqueReasoning]);}
+// Selectable effort metadata does not change the signed tool transport already validated.
+function protocolFingerprint(model){return hash([ADAPTER,model.id,model.contextWindow,model.maxOutputTokens,model.inputModalities,model.supportsTools,model.preserveOpaqueReasoning]);}
 function abortable(action,signal){
   if(signal?.aborted)return Promise.reject(fail('gemini_sync_cancelled'));
   return new Promise((resolve,reject)=>{
@@ -25,7 +28,17 @@ function abortable(action,signal){
     Promise.resolve().then(action).then(value=>done(resolve,value),error=>done(reject,error));
   });
 }
-function displayName(id){return id.replace(/-high$/,'').split('-').map((part,index)=>index===0?'Gemini':part==='flash'?'Flash':part==='lite'?'Lite':part==='pro'?'Pro':part==='argon'?'Argon':part).join(' ');}
+function displayName(id){return id.replace(/-high$/,'').replace(/(claude-(?:sonnet|opus))-(\d+)-(\d+)/,'$1-$2.$3').split('-').map((part,index)=>index===0?(part==='claude'?'Claude':'Gemini'):['flash','lite','pro','argon','sonnet','opus'].includes(part)?part[0].toUpperCase()+part.slice(1):part).join(' ');}
+function reasoningCapabilities(id,detail){
+  const fallback=/-high$/.test(id)?'high':'none';
+  // Claude budget metadata proves transport support, not backend effort variability.
+  if(!id.startsWith('gemini-'))return {reasoningEfforts:[fallback],defaultReasoningEffort:fallback};
+  const levels=detail?.thinking?.levels;
+  if(!Array.isArray(levels)||!levels.length||levels.length>GEMINI_EFFORTS.size||levels.some(level=>!GEMINI_EFFORTS.has(level))||new Set(levels).size!==levels.length)return {reasoningEfforts:[fallback],defaultReasoningEffort:fallback};
+  const reasoningEfforts=['minimal','low','medium','high'].filter(level=>levels.includes(level));
+  const preferred=/-high$/.test(id)?'high':'medium';
+  return {reasoningEfforts,defaultReasoningEffort:reasoningEfforts.includes(preferred)?preferred:reasoningEfforts.includes(fallback)?fallback:reasoningEfforts[0]};
+}
 function account(root){
   try{
     const names=fs.readdirSync(path.join(root,'private','auth')).filter(name=>name.endsWith('.json'));
@@ -57,16 +70,25 @@ async function readCatalogs(root,target,{signal,requestJSON=readJSON}={}){
   const control=JSON.parse(fs.readFileSync(path.join(root,'private','control.json'),'utf8'));
   if(!/^[a-f0-9]{64}$/.test(control.managementKey||''))throw fail('gemini_local_control_invalid');
   const base=`http://127.0.0.1:${metadata.port}`;
-  const [available,native,registered]=await Promise.all([
+  const [available,native,registered,definitions]=await Promise.all([
     requestJSON(new URL(base+'/v1/models'),{headers:target.headers,signal}),
     requestJSON(new URL(base+'/v1beta/models'),{headers:target.headers,signal}),
-    requestJSON(new URL(base+'/v8/management/credentials/models?name='+encodeURIComponent(current.name)),{headers:{authorization:'Bearer '+control.managementKey},signal})
+    requestJSON(new URL(base+'/v8/management/credentials/models?name='+encodeURIComponent(current.name)),{headers:{authorization:'Bearer '+control.managementKey},signal}),
+    requestJSON(new URL(base+'/v8/management/routing/model-definitions/antigravity'),{headers:{authorization:'Bearer '+control.managementKey},signal})
   ]);
-  return {available,native,registered};
+  return {available,native,registered,definitions};
 }
-function discoverModels({available,native,registered}){
+function discoverModels({available,native,registered,definitions}){
   if(!Array.isArray(available?.data)||!Array.isArray(native?.models)||!Array.isArray(registered?.models)||!available.data.length||!registered.models.length)throw fail('gemini_catalog_empty_or_invalid');
   if([available.data,native.models,registered.models].some(rows=>rows.length>10000))throw fail('gemini_catalog_too_large');
+  const metadata=new Map();
+  if(definitions!==undefined){
+    if(definitions?.channel!=='antigravity'||!Array.isArray(definitions.models)||definitions.models.length>10000)throw fail('gemini_catalog_invalid_definitions');
+    for(const row of definitions.models){
+      if(!row||typeof row.id!=='string'||row.id.length>200||/[\x00-\x1f]/.test(row.id)||metadata.has(row.id))throw fail('gemini_catalog_invalid_definitions');
+      metadata.set(row.id,row);
+    }
+  }
   const ids=new Set();
   for(const row of registered.models){
     if(!row||typeof row.id!=='string'||row.id.length>200||/[\x00-\x1f]/.test(row.id)||ids.has(row.id))throw fail('gemini_catalog_invalid_registry');
@@ -75,8 +97,10 @@ function discoverModels({available,native,registered}){
   const candidates=[],pending=[];const seen=new Set();
   for(const row of available.data){
     if(!ID.test(row?.id||''))continue;
-    if(seen.has(row.id)||row.owned_by!=='antigravity'||!ids.has(row.id))throw fail('gemini_catalog_invalid_models');
+    if(seen.has(row.id)||row.owned_by!=='antigravity')throw fail('gemini_catalog_invalid_models');
     seen.add(row.id);
+    // Static/public definitions never confer entitlement on this signed-in account.
+    if(!ids.has(row.id))continue;
     const matches=native.models.filter(model=>typeof model?.name==='string'&&model.name.replace(/^models\//,'')===row.id);
     if(matches.length!==1){pending.push({id:row.id,reason:'模型能力资料尚未确认'});continue;}
     const detail=matches[0];
@@ -86,8 +110,7 @@ function discoverModels({available,native,registered}){
     if(![detail.inputTokenLimit,detail.outputTokenLimit].every(value=>Number.isSafeInteger(value)&&value>0&&value<=100000000)){
       pending.push({id:row.id,reason:'上下文或输出上限资料缺失'});continue;
     }
-    const effort=/-high$/.test(row.id)?'high':'none';
-    candidates.push({id:row.id,displayName:displayName(row.id),contextWindow:detail.inputTokenLimit,maxOutputTokens:Math.min(detail.outputTokenLimit,detail.inputTokenLimit,65536),inputModalities:detail.supportedInputModalities.includes('image')?['text','image']:['text'],supportsTools:true,reasoningEfforts:[effort],defaultReasoningEffort:effort,preserveOpaqueReasoning:true});
+    candidates.push({id:row.id,displayName:displayName(row.id),contextWindow:detail.inputTokenLimit,maxOutputTokens:Math.min(detail.outputTokenLimit,detail.inputTokenLimit,65536),inputModalities:detail.supportedInputModalities.includes('image')?['text','image']:['text'],supportsTools:true,...reasoningCapabilities(row.id,metadata.get(row.id)),preserveOpaqueReasoning:true});
   }
   // Quota cooldown can hide an available model; registry membership remains authoritative for retirement.
   for(const id of ids)if(ID.test(id)&&!seen.has(id))pending.push({id,reason:'上游暂未开放调用，稍后自动检查'});
@@ -100,7 +123,7 @@ function createToolProbe({requestUpstream,readBody,events}){
     if(!port||Number(port)<1||Number(port)>65535)throw fail('gemini_probe_endpoint_invalid');
     const slug=`custom/${PROVIDER}/${encodeURIComponent(model.id)}`;
     const scope=hash([ADAPTER,accountIdentity,model.id,fingerprint(model)]);
-    const candidate={...target,model,modelId:model.id,url:new URL(target.baseUrl+'/responses'),preserveOpaqueReasoning:true,historyScope:scope};
+    const candidate={...target,model,modelId:model.id,url:new URL(target.baseUrl+'/responses'),preserveOpaqueReasoning:true,historyScope:scope,...(/^claude-/.test(model.id)?{opaqueReasoningFormat:'antigravity-claude-responses-v1'}:{})};
     // The credentials are deliberately non-enumerable on the production target.
     Object.defineProperty(candidate,'headers',{value:target.headers});
     const runner=createProviderRunner({providers:{upstreamForSlug:id=>{if(id!==slug)throw fail('gemini_probe_model_mismatch');return candidate;}},deepseekBase:'',getDeepseekKey:()=>'',secret:crypto.randomBytes(32).toString('hex'),requestUpstream,readBody,events});
@@ -112,7 +135,11 @@ function createToolProbe({requestUpstream,readBody,events}){
     const first=await runner.run({route:{provider:'custom:'+PROVIDER},request:firstResolved.request,historyScope:firstResolved.opaqueReasoningScope,signal});
     const calls=first.output?.filter(item=>item.type==='custom_tool_call')||[];
     if(first.status!=='completed'||calls.length!==1||calls[0].name!=='apply_patch'||calls[0].namespace!=='transport_check'||typeof calls[0].input!=='string')throw fail('gemini_probe_tool_incompatible',400);
-    if(!(first.output||[]).some(isGeminiReasoningCarrier))throw fail('gemini_probe_signature_missing',400);
+    const reasoning=(first.output||[]).filter(item=>item.type==='reasoning'),claude=/^claude-/.test(model.id);
+    // Adaptive Claude can legitimately skip thinking for a forced tool call.
+    // Once it emits thinking, every issued block must carry its signed text.
+    if(claude?reasoning.some(item=>decodeAntigravityClaudeReasoningCarrier(item)===undefined):!reasoning.some(isGeminiReasoningCarrier))throw fail('gemini_probe_signature_missing',400);
+    const signatureCarrier=reasoning.some(isGeminiReasoningCarrier);
     history.remember(firstResolved.request,first,{...context,resolved:firstResolved});
     const marker='gemini-auto-'+crypto.randomBytes(8).toString('hex');
     const next={model:slug,previous_response_id:first.id,input:[{type:'custom_tool_call_output',call_id:calls[0].call_id,output:'Protocol passed. Marker: '+marker},{role:'user',content:'Reply with the exact marker from the tool. Do not call any tools.'}],tools,max_output_tokens:4096,reasoning:{effort:model.defaultReasoningEffort}};
@@ -121,7 +148,7 @@ function createToolProbe({requestUpstream,readBody,events}){
     const text=(second.output||[]).filter(item=>item.type==='message').flatMap(item=>item.content||[]).map(part=>part.text||'').join('');
     if(second.status!=='completed'||!text.includes(marker))throw fail('gemini_probe_continuation_failed',400);
     history.clear();
-    return {toolCall:true,toolResult:true,signatureCarrier:(first.output||[]).some(item=>item.type==='reasoning'&&String(item.encrypted_content||'').startsWith('cpa-gemini-responses-carrier-v1:'))};
+    return {toolCall:true,toolResult:true,toolContinuation:true,signatureCarrier,reasoningAbsent:reasoning.length===0};
   };
 }
 
@@ -192,8 +219,8 @@ function createGeminiUpdater(options){
   function key(identity,model){return hash([identity,fingerprint(model)]);}
   async function perform(){
     let snapshot=providers.getDiscoverySnapshot(PROVIDER);
-    if(closed||!snapshot?.enabled){Object.assign(view,{enabled:false,busy:false,state:'paused',message:snapshot?'Gemini 自动更新已暂停，现有模型保留':'Gemini 服务商已移除，自动更新已暂停'});return status();}
-    Object.assign(view,{enabled:true,busy:true,state:'checking',lastCheckedAt:stamp(now),nextCheckAt:new Date(now()+intervalMs).toISOString(),pending:[],errorCode:null,message:'正在检查 Gemini 账号与模型目录'});
+    if(closed||!snapshot?.enabled){Object.assign(view,{enabled:false,busy:false,state:'paused',message:snapshot?'Antigravity 自动更新已暂停，现有模型保留':'Antigravity 服务商已移除，自动更新已暂停'});return status();}
+    Object.assign(view,{enabled:true,busy:true,state:'checking',lastCheckedAt:stamp(now),nextCheckAt:new Date(now()+intervalMs).toISOString(),pending:[],errorCode:null,message:'正在检查 Antigravity 账号与模型目录'});
     controller=new AbortController();
     const signal=controller.signal;
     try{
@@ -214,7 +241,13 @@ function createGeminiUpdater(options){
         if(excluded.has(model.id)||(existing.has(model.id)&&!managed.has(model.id)))continue;
         const cacheKey=key(target.accountIdentity,model);
         const prior=existing.get(model.id);
-        if(prior&&managed.has(model.id)&&fingerprint(prior)===fingerprint(model))data.verified[cacheKey]={checkedAt:data.verified[cacheKey]?.checkedAt||stamp(now),source:'already_registered'};
+        const priorProof=prior&&data.verified[key(target.accountIdentity,prior)];
+        if(prior&&managed.has(model.id)&&protocolFingerprint(prior)===protocolFingerprint(model)&&(fingerprint(prior)===fingerprint(model)||priorProof)){
+          // Migrate an existing account-bound proof across effort-only metadata changes.
+          // Unchanged managed models retain the initial bootstrap validation contract.
+          const existingProof=data.verified[cacheKey]||priorProof;
+          data.verified[cacheKey]={...existingProof,checkedAt:existingProof?.checkedAt||stamp(now),source:fingerprint(prior)===fingerprint(model)?existingProof?.source||'already_registered':'reasoning_metadata_update',protocolFingerprint:protocolFingerprint(model)};
+        }
         if(!data.verified[cacheKey]){
           if(Date.parse(data.probeBackoffUntil||'')>now()){
             view.pending.push({id:model.id,reason:'订阅额度或权限受限，等待统一退避后再验证',nextProbeAt:data.probeBackoffUntil});continue;
@@ -222,17 +255,18 @@ function createGeminiUpdater(options){
           const previous=data.failed[cacheKey];
           if(previous&&Date.parse(previous.nextProbeAt)>now()){view.pending.push({id:model.id,reason:previous.reason,nextProbeAt:previous.nextProbeAt});continue;}
           if(tested>=limit){view.pending.push({id:model.id,reason:'等待下次兼容性验证'});continue;}
-          tested++;view.state='validating';view.message='正在验证新发现的 Gemini 模型';
+          tested++;view.state='validating';view.message='正在验证新发现的 Antigravity 模型';
           const probeController=new AbortController();
           const abortProbe=()=>probeController.abort();signal.addEventListener('abort',abortProbe,{once:true});
           const timeout=setTimeout(()=>probeController.abort(),options.probeTimeoutMs??180000);
           try{
             assertAccount(target.accountIdentity);
-            await abortable(()=>probe({model,target,accountIdentity:target.accountIdentity,signal:probeController.signal}),probeController.signal);
+            const proof=await abortable(()=>probe({model,target,accountIdentity:target.accountIdentity,signal:probeController.signal}),probeController.signal);
             if(probeController.signal.aborted&&!signal.aborted)throw fail('gemini_probe_timeout',504);
             assertAccount(target.accountIdentity);
             if(closed||signal.aborted)throw fail('gemini_sync_cancelled');
-            data.verified[cacheKey]={checkedAt:stamp(now),source:'tool_round_trip'};delete data.failed[cacheKey];
+            const withoutReasoning=/^claude-/.test(model.id)&&proof?.signatureCarrier===false&&proof?.reasoningAbsent===true;
+            data.verified[cacheKey]={checkedAt:stamp(now),source:withoutReasoning?'tool_continuation_without_reasoning':'tool_round_trip',...(typeof proof?.signatureCarrier==='boolean'?{signatureCarrier:proof.signatureCarrier}:{}),...(proof?.toolContinuation===true?{toolContinuation:true}:{}),...(withoutReasoning?{reasoningAbsent:true}:{})};delete data.failed[cacheKey];
           }catch(error){
             if(closed||signal.aborted||error.code==='gemini_account_changed')throw error;
             const probeError=probeController.signal.aborted?fail('gemini_probe_timeout',504):error;
@@ -266,7 +300,7 @@ function createGeminiUpdater(options){
     }catch(error){
       const code=/^[a-z0-9_]{1,100}$/.test(error.code||'')?error.code:'gemini_sync_failed';
       const paused=!providers.getDiscoverySnapshot(PROVIDER)?.enabled;
-      Object.assign(view,{state:paused||code==='gemini_account_changed'?'paused':'degraded',errorCode:code,message:paused?'Gemini 自动更新已暂停，现有模型保留':code==='gemini_account_changed'?'Google 登录账号已改变，请重新验证；Gemini 请求已阻断':'本次检查未完成，已保留上次可用模型列表'});
+      Object.assign(view,{state:paused||code==='gemini_account_changed'?'paused':'degraded',errorCode:code,message:paused?'Antigravity 自动更新已暂停，现有模型保留':code==='gemini_account_changed'?'Google 登录账号已改变，请重新验证；Antigravity 请求已阻断':'本次检查未完成，已保留上次可用模型列表'});
       options.log?.({event:'gemini_catalog_check_failed',code});
     }finally{
       view.busy=false;controller=null;
@@ -284,9 +318,9 @@ function createGeminiUpdater(options){
     const snapshot=providers.getDiscoverySnapshot(PROVIDER);
     if(!snapshot)throw fail('gemini_provider_removed',404);
     await providers.configureAutoDiscovery(PROVIDER,{enabled,managedModelIds:snapshot.managedModelIds});
-    if(enabled)refresh().catch(()=>{});else Object.assign(view,{state:'paused',message:'Gemini 自动更新已暂停，现有模型保留'});
+    if(enabled)refresh().catch(()=>{});else Object.assign(view,{state:'paused',message:'Antigravity 自动更新已暂停，现有模型保留'});
     return status();
   }
   return {start,refresh,status,assertRoute,close,setEnabled};
 }
-module.exports={createGeminiUpdater,createToolProbe,discoverModels,fingerprint,account,readCatalogs};
+module.exports={createGeminiUpdater,createToolProbe,discoverModels,fingerprint,protocolFingerprint,account,readCatalogs};
