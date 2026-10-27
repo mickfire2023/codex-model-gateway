@@ -12,10 +12,10 @@ const varint=number=>{const bytes=[];do{const next=number%128;number=Math.floor(
 const bytes=(number,value)=>Buffer.concat([varint(number*8+2),varint(value.length),value]);
 const integer=(number,value)=>Buffer.concat([varint(number*8),varint(value)]);
 function signature(form='R',overrides={}){
-  const channel=Buffer.concat([integer(1,overrides.channel??(form==='Q'?18:12)),integer(2,2),
-    form==='Q'?bytes(8,Buffer.from('thinking')):bytes(6,Buffer.from('claude-synthetic'))]);
-  const container=Buffer.concat([bytes(1,channel),...(form==='Q'?[bytes(5,Buffer.alloc(64,7))]:[])]);
-  const payload=Buffer.concat([...(form==='Q'?[integer(1,4)]:[]),bytes(2,container),integer(3,1)]);
+  const channel=Buffer.concat([integer(1,overrides.channel??(form==='Q'?18:12)),integer(2,overrides.infra??2),
+    form==='Q'?bytes(8,Buffer.from(overrides.blockKind??'thinking')):bytes(6,Buffer.from('claude-synthetic'))]);
+  const container=Buffer.concat([bytes(1,channel),...(overrides.duplicateChannel?[bytes(1,channel)]:[]),...(form==='Q'?[bytes(5,Buffer.alloc(overrides.signatureLength??64,7))]:[])]);
+  const payload=Buffer.concat([...(form==='Q'?[integer(1,overrides.envelopeVersion??4)]:[]),bytes(2,container),...(overrides.duplicateContainer?[bytes(2,container)]:[]),integer(3,1)]);
   const inner=payload.toString('base64');
   return form==='E'?inner:Buffer.from(inner).toString('base64');
 }
@@ -47,7 +47,10 @@ test('Claude dispatch rejects Gemini, malformed, nested and empty-summary carrie
   const gemini='EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA';
   const marked=carrier();
   const rejected=[carrier(gemini),carrier('gAAAA-synthetic-openai'),carrier('skip_thought_signature_validator'),
-    carrier('E!'),carrier('RA=='),carrier(signature('Q',{channel:17})),carrier(marked.encrypted_content),
+    carrier('E!'),carrier('RA=='),carrier(signature('Q',{channel:17})),carrier(signature('Q',{channel:20})),
+    ...[{channel:19,infra:1},{channel:19,envelopeVersion:3},{channel:19,blockKind:'narration'},
+      {channel:19,signatureLength:0},{channel:19,duplicateContainer:true},{channel:19,duplicateChannel:true}].map(shape=>carrier(signature('Q',shape))),
+    carrier(marked.encrypted_content),
     carrier(signature(),{summary:[]}),carrier(signature(),{summary:[{type:'summary_text',text:'  '}]}),
     carrier(signature(),{summary:[{type:'reasoning_text',text:'wrong summary part'}]}),
     {...marked,encrypted_content:marked.encrypted_content+'='},
@@ -60,6 +63,21 @@ test('Claude dispatch rejects Gemini, malformed, nested and empty-summary carrie
   }
   const ordinaryGemini={type:'reasoning',encrypted_content:'cpa-gemini-responses-carrier-v1:next:function:c3ludGhldGlj',summary:[]};
   assert.deepEqual(createAdapter({input:[ordinaryGemini]},{preserveOpaqueReasoning:true}).body.input,[ordinaryGemini],'existing Gemini carrier behavior is unchanged');
+});
+
+test('observed Google version-4 channel 19 stays replayable only with issued provenance',()=>{
+  const raw=signature('Q',{channel:19}),item=carrier(raw),history=createHistoryStore();
+  assert.ok(isAntigravityClaudeReasoningCarrier(item));
+  assert.equal(decodeAntigravityClaudeReasoningCarrier(item),raw);
+  const request={model:slug,input:[user('start')]},resolved=history.resolve(request,context());
+  history.remember(request,{id:'channel19',output:[item]},context({resolved}));
+  const trusted=history.resolve({model:slug,previous_response_id:'channel19',input:[user('continue')]},context());
+  const body=createAdapter(trusted.request,opts).body;
+  assert.equal(body.input.find(x=>x.type==='reasoning').encrypted_content,raw);
+  for(const override of [{historyScope:'b'.repeat(64)},{provider:'deepseek',preserveOpaqueReasoning:false},{provider:'custom:other'}]){
+    const foreign=history.resolve({model:slug,input:[item,user('continue')]},context(override));
+    assert.deepEqual(foreign.request.input,[user('continue')]);
+  }
 });
 
 test('history provenance binds encrypted content and signed summary/content while ignoring id/status and object key order',()=>{

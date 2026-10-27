@@ -21,13 +21,16 @@ try {
     Assert-Scheduler ($Directory -ceq 'parent-directory-must-not-change' -and -not $LibraryOnly) 'Loading scheduler changed the parent script parameters.'
     New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
     Copy-Item -LiteralPath $module -Destination (Join-Path $fixtureRoot 'scheduler.ps1')
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $module) 'task-launcher.vbs') -Destination (Join-Path $fixtureRoot 'task-launcher.vbs')
     Write-SchedulerFixture (Join-Path $fixtureRoot 'runner.ps1') @'
 param([string]$Directory)
 $ErrorActionPreference='Stop'
+. (Join-Path $Directory 'scheduler.ps1') -LibraryOnly
+$launcher=Get-GatewayScheduledLauncherParent $Directory
 $target=Join-Path $Directory 'runner.json'
 $text=@{state='running';pid=$PID}|ConvertTo-Json -Compress
 [IO.File]::WriteAllText($target,$text,(New-Object Text.UTF8Encoding($false)))
-while($true){Start-Sleep -Milliseconds 200}
+try { while(-not $launcher -or -not $launcher.HasExited){Start-Sleep -Milliseconds 100} } finally { if($launcher){$launcher.Dispose()} }
 '@
     Write-SchedulerFixture (Join-Path $fixtureRoot 'control.ps1') @'
 param([string]$Directory,[ValidateSet('restart','restore')][string]$Action)
@@ -68,6 +71,11 @@ try{
     Assert-Scheduler (-not $task.Definition.Settings.DisallowStartIfOnBatteries -and -not $task.Definition.Settings.StopIfGoingOnBatteries) 'Battery settings can stop the service.'
     Assert-Scheduler ([int]$task.Definition.Settings.MultipleInstances -eq 2) 'Service can create duplicate instances.'
     Assert-Scheduler ([int]$task.Definition.Triggers.Count -eq 1 -and [int]$task.Definition.Triggers.Item(1).Type -eq 9) 'Service does not have its login trigger.'
+    $serviceIdentity=Get-GatewaySchedulerIdentity $fixtureRoot 'service'
+    Assert-Scheduler ([string]$task.Definition.Actions.Item(1).Path -ceq $serviceIdentity.Executable -and [string]$task.Definition.Actions.Item(1).Arguments -ceq $serviceIdentity.Arguments) 'New tasks do not use the fixed GUI launcher.'
+    $unboundRejected=$false
+    try{Get-GatewayScheduledLauncherParent $fixtureRoot|Out-Null}catch{$unboundRejected=$true}
+    Assert-Scheduler $unboundRejected 'A current GUI task without its exact launcher parent was treated as legacy.'
     Run-GatewayScheduledService $fixtureRoot | Out-Null
     $first=Wait-SchedulerState (Join-Path $fixtureRoot 'runner.json') 'running'
     Assert-Scheduler ((Get-GatewayTaskState $fixtureRoot).State -eq 'running') 'Scheduled service did not run.'
@@ -114,6 +122,60 @@ try{
     Restore-GatewayScheduledTaskSnapshot $fixtureRoot $emptySnapshot
     Assert-Scheduler ((Get-GatewayTaskState $fixtureRoot).State -eq 'missing') 'An empty snapshot did not remove the owned task.'
     $identity=Get-GatewaySchedulerIdentity $fixtureRoot 'service'
+    $legacy=New-GatewayScheduledDefinition $connection $identity
+    $legacy.Actions.Item(1).Path=$identity.LegacyExecutable
+    $legacy.Actions.Item(1).Arguments=$identity.LegacyArguments
+    $legacy.Settings.Enabled=$false
+    $legacy.Settings.Hidden=$false
+    $legacy.Triggers.Item(1).Delay='PT7S'
+    $folder.RegisterTaskDefinition($identity.Name,$legacy,6,$identity.Sid,$null,3,$null)|Out-Null
+    $legacySnapshot=Get-GatewayScheduledTaskSnapshot $fixtureRoot
+    Assert-Scheduler (Test-GatewayTaskUsesLegacyLauncher (Get-GatewayScheduledService $fixtureRoot).Definition $identity) 'A legacy owned task was not recognized without migration.'
+    Assert-Scheduler ($null -eq (Get-GatewayScheduledLauncherParent $fixtureRoot -RequireManagedLauncher)) 'A genuine legacy scheduled action no longer supports its original parent context.'
+    Assert-Scheduler ([string](Get-GatewayScheduledService $fixtureRoot).Xml -ceq $legacySnapshot.Xml) 'Read-only inspection migrated a legacy task.'
+    Update-GatewayScheduledTaskLauncher $fixtureRoot|Out-Null
+    $migrated=Get-GatewayScheduledService $fixtureRoot
+    Assert-Scheduler (-not (Test-GatewayTaskUsesLegacyLauncher $migrated.Definition $identity) -and -not $migrated.Enabled) 'Legacy migration failed to preserve explicit stop.'
+    Assert-Scheduler (-not $migrated.Definition.Settings.Hidden -and $migrated.Definition.Triggers.Item(1).Delay -ceq 'PT7S') 'Legacy migration reset non-action settings.'
+    Restore-GatewayScheduledTaskSnapshot $fixtureRoot $legacySnapshot|Out-Null
+    Assert-Scheduler (Test-GatewayTaskUsesLegacyLauncher (Get-GatewayScheduledService $fixtureRoot).Definition $identity) 'A legacy snapshot could not be restored.'
+    Register-GatewayScheduledService $fixtureRoot|Out-Null
+    Assert-Scheduler (-not (Test-GatewayTaskUsesLegacyLauncher (Get-GatewayScheduledService $fixtureRoot).Definition $identity) -and -not (Get-GatewayScheduledService $fixtureRoot).Enabled) 'Register did not safely migrate a stopped legacy task.'
+    $safeSnapshot=Get-GatewayScheduledTaskSnapshot $fixtureRoot
+    Set-GatewayScheduledServiceEnabled $fixtureRoot $true
+    Remove-Item -LiteralPath (Join-Path $fixtureRoot 'runner.json') -Force
+    Run-GatewayScheduledService $fixtureRoot|Out-Null
+    Wait-SchedulerState (Join-Path $fixtureRoot 'runner.json') 'running'|Out-Null
+    $active=(Get-GatewayScheduledService $fixtureRoot).Definition
+    $active.Actions.Item(1).Path=$identity.LegacyExecutable
+    $active.Actions.Item(1).Arguments=$identity.LegacyArguments
+    # Re-label the live synthetic task definition without launching its legacy
+    # action. This tests active migration protection without opening a console.
+    $folder.RegisterTaskDefinition($identity.Name,$active,6,$identity.Sid,$null,3,$null)|Out-Null
+    $activeLegacy=Get-GatewayScheduledTaskSnapshot $fixtureRoot
+    Register-GatewayScheduledService $fixtureRoot|Out-Null
+    Assert-Scheduler ((Get-GatewayScheduledTaskSnapshot $fixtureRoot).Xml -ceq $activeLegacy.Xml) 'Register changed an active legacy task.'
+    $activeMigrationRejected=$false
+    try{Update-GatewayScheduledTaskLauncher $fixtureRoot|Out-Null}catch{$activeMigrationRejected=$true}
+    Assert-Scheduler $activeMigrationRejected 'Explicit migration replaced an active legacy task.'
+    Stop-GatewayScheduledService $fixtureRoot
+    Restore-GatewayScheduledTaskSnapshot $fixtureRoot $safeSnapshot|Out-Null
+    $tampered=(Get-GatewayScheduledService $fixtureRoot).Definition
+    $tampered.Actions.Item(1).Path=$identity.LegacyExecutable
+    $tampered.Actions.Item(1).Arguments=$identity.LegacyArguments+' -Unapproved synthetic'
+    $folder.RegisterTaskDefinition($identity.Name,$tampered,6,$identity.Sid,$null,3,$null)|Out-Null
+    $tamperedXml=[string]$folder.GetTask($identity.Name).Xml
+    $tamperedRejected=$false
+    try{Update-GatewayScheduledTaskLauncher $fixtureRoot|Out-Null}catch{$tamperedRejected=$true}
+    Assert-Scheduler ($tamperedRejected -and [string]$folder.GetTask($identity.Name).Xml -ceq $tamperedXml) 'A modified legacy command was accepted or changed.'
+    $folder.DeleteTask($identity.Name,0)
+    Restore-GatewayScheduledTaskSnapshot $fixtureRoot $safeSnapshot|Out-Null
+    Write-SchedulerFixture (Join-Path $fixtureRoot 'control.ps1') 'param([string]$Directory,[string]$Action) exit 17'
+    Run-GatewayScheduledControl $fixtureRoot 'restart'|Out-Null
+    Start-Sleep -Milliseconds 750
+    Wait-ControlReady $fixtureRoot 'restart'
+    Assert-Scheduler ((Get-GatewayTaskState $fixtureRoot 'restart').LastResult -eq 17) 'The GUI task launcher did not preserve its child exit code.'
+    Remove-GatewayScheduledService $fixtureRoot
     $foreign=New-GatewayScheduledDefinition $connection $identity
     $foreign.RegistrationInfo.Description='Deliberately foreign synthetic fixture'
     $folder.RegisterTaskDefinition($identity.Name,$foreign,6,$identity.Sid,$null,3,$null)|Out-Null

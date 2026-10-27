@@ -139,6 +139,34 @@ try {
     Assert-Scheduled ((Get-Content -LiteralPath (Join-Path $installed 'private\deepseek-key.dpapi') -Raw) -ceq 'synthetic-ciphertext-never-decrypted') 'Encrypted fixture data changed during migration.'
     Write-Output 'PASS: independent scheduled deployment and KeepDirectConnection.'
 
+    $launcherIdentity=Get-GatewaySchedulerIdentity $installed 'service'
+    $launchers=@(Get-CimInstance Win32_Process -Filter "Name = 'wscript.exe'" | Where-Object {
+        $arguments=[regex]::Replace([string]$_.CommandLine,'^(?:"[^"]+"|\S+)\s+','')
+        [string]::Equals([string]$_.ExecutablePath,$launcherIdentity.Executable,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($arguments,$launcherIdentity.Arguments,[StringComparison]::OrdinalIgnoreCase)
+    })
+    Assert-Scheduled ($launchers.Count -eq 1) 'The synthetic service did not have one exact GUI launcher.'
+    $launcherHandle=[Diagnostics.Process]::GetProcessById([int]$launchers[0].ProcessId)
+    try {
+        $null=$launcherHandle.Handle
+        $fresh=Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$launchers[0].ProcessId)
+        Assert-Scheduled ($fresh -and $fresh.CreationDate -eq $launchers[0].CreationDate) 'The synthetic GUI launcher identity changed.'
+        $launcherHandle.Kill()
+        Assert-Scheduled ($launcherHandle.WaitForExit(5000)) 'The terminated synthetic GUI launcher remained alive.'
+    } finally { $launcherHandle.Dispose() }
+    $deadline=[DateTime]::UtcNow.AddSeconds(8)
+    do {
+        $remaining=@(Get-GatewayOwnedProcesses $installed)
+        if(-not $remaining.Count -and -not (Read-ScheduledHealth $port)){break}
+        Start-Sleep -Milliseconds 150
+    } while([DateTime]::UtcNow -lt $deadline)
+    Assert-Scheduled ($remaining.Count -eq 0 -and -not (Read-ScheduledHealth $port)) 'A killed GUI launcher left an orphan runner or Node.'
+    Start-Sleep -Seconds 2
+    Assert-Scheduled (@(Get-GatewayOwnedProcesses $installed).Count -eq 0) 'The detached supervisor restarted Node after its GUI launcher exited.'
+    Stop-GatewayScheduledService $installed
+    Start-GatewayService $installed 30
+    Assert-Scheduled ([bool](Read-ScheduledHealth $port)) 'An enabled service did not recover after synthetic launcher termination.'
+    Write-Output 'PASS: force-terminated GUI launcher leaves no orphan runner or Node.'
+
     $restore = Invoke-ScheduledScript (Join-Path $installed 'restore.ps1')
     Assert-Scheduled ($restore.Code -eq 0) ('No-Directory restore failed: ' + $restore.ErrorOutput)
     Assert-Scheduled ((Read-ScheduledText $config) -ceq $directConfig) 'Direct config changed during no-Directory restore.'
