@@ -49,12 +49,14 @@ async function validate(root,{sourceDirectory,fixtureDirectory}={}){
       const first=await send({model:model.slug,input:'Call workspace.apply_patch once with input exactly "*** Begin Patch\\n*** End Patch". This is a non-executing gateway transport check. Do not answer in text yet.',tools,tool_choice:{type:'custom',name:'apply_patch',namespace:'workspace'},reasoning:{effort:model.defaultReasoningEffort}},session);
       const calls=(first.output||[]).filter(x=>x.type==='custom_tool_call');
       if(calls.length!==1||calls[0].name!=='apply_patch'||calls[0].namespace!=='workspace'||typeof calls[0].input!=='string')throw new Error('Gemini did not return a valid wrapped custom tool call.');
-      const carriers=(first.output||[]).filter(x=>x.type==='reasoning'&&String(x.encrypted_content||'').startsWith('cpa-gemini-responses-carrier-v1:'));
-      if(!carriers.length)throw new Error('No Gemini tool signature carrier was returned.');
+      const {isGeminiReasoningCarrier,decodeAntigravityClaudeReasoningCarrier}=require(path.join(sourceDirectory,'deepseek-adapter.cjs'));
+      const reasoning=(first.output||[]).filter(x=>x.type==='reasoning'),claude=/^claude-/.test(model.id);
+      if(claude?reasoning.some(item=>decodeAntigravityClaudeReasoningCarrier(item)===undefined):!reasoning.some(isGeminiReasoningCarrier))throw new Error('Issued subscription thinking must include a valid tool signature carrier and signed text.');
+      const signatureCarrier=reasoning.some(isGeminiReasoningCarrier);
       const second=await send({model:model.slug,previous_response_id:first.id,input:[{type:'custom_tool_call_output',call_id:calls[0].call_id,output:'Protocol check succeeded. Marker: '+marker},{role:'user',content:'Reply with the exact marker supplied by the tool. Do not call any more tools.'}],tools,reasoning:{effort:model.defaultReasoningEffort}},session);
       const text=(second.output||[]).filter(x=>x.type==='message').flatMap(x=>x.content||[]).map(x=>x.text||'').join('');
       if(!text.includes(marker))throw new Error('Gemini did not preserve the tool result across the second turn.');
-      results.push({id:model.id,toolCall:true,customToolWrapper:true,signatureContinuation:true,toolResult:true});
+      results.push({id:model.id,toolCall:true,customToolWrapper:true,signatureContinuation:signatureCarrier,signatureCarrier,reasoningAbsent:reasoning.length===0,toolContinuation:true,toolResult:true});
       console.log(JSON.stringify({validated:model.id,toolRoundTrip:true}));
     }
     const report={validatedAt:new Date().toISOString(),proxyRelease:'8.0.43',models:results,provider:candidate.provider};

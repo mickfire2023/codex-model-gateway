@@ -8,7 +8,7 @@ async function register(bridgeRoot,gatewayRoot){
   if(!Number.isFinite(Date.parse(report.validatedAt))||Date.now()-Date.parse(report.validatedAt)>24*60*60*1000)throw new Error('Run a fresh subscription tool validation before registration.');
   const candidate=await catalogs(bridgeRoot,{sourceDirectory:gatewayRoot});
   if(candidate.provider.opaqueReasoningIdentity!==report.provider?.opaqueReasoningIdentity)throw new Error('The Google account changed after validation. Start a new validation.');
-  const passed=new Set(report.models.filter(m=>m.toolCall&&m.customToolWrapper&&m.signatureContinuation&&m.toolResult).map(m=>m.id));
+  const passed=new Set(report.models.filter(m=>m.toolCall&&m.customToolWrapper&&m.toolResult&&(m.signatureContinuation||(/^claude-/.test(m.id)&&m.toolContinuation===true&&m.signatureCarrier===false&&m.reasoningAbsent===true))).map(m=>m.id));
   candidate.provider.models=candidate.provider.models.filter(m=>passed.has(m.id));
   if(!candidate.provider.models.length)throw new Error('No currently available Gemini model passed the tool validation.');
   const version=JSON.parse(fs.readFileSync(path.join(gatewayRoot,'package.json'),'utf8')).version;

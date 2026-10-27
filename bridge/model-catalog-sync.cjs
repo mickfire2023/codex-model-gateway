@@ -31,10 +31,18 @@ function validateCatalog(raw,{maxBytes=DEFAULT_MAX_BYTES}={}){
       if(section!=='antigravity')continue;
       for(const key of ['context_length','max_completion_tokens'])if(row[key]!==undefined&&row[key]!==null&&(!Number.isSafeInteger(row[key])||row[key]<1||row[key]>100000000))throw failure('catalog_model_limits_invalid');
       for(const key of ['supportedInputModalities','supportedOutputModalities'])if(row[key]!==undefined&&(!Array.isArray(row[key])||row[key].length>16||row[key].some(x=>typeof x!=='string'||!/^[a-z][a-z0-9_-]{0,31}$/i.test(x))))throw failure('catalog_model_modalities_invalid');
+      if(row.thinking!==undefined&&row.thinking!==null){
+        if(!object(row.thinking))throw failure('catalog_model_thinking_invalid');
+        for(const key of ['min','max'])if(row.thinking[key]!==undefined&&(!Number.isSafeInteger(row.thinking[key])||row.thinking[key]<0||row.thinking[key]>100000000))throw failure('catalog_model_thinking_invalid');
+        if(row.thinking.min!==undefined&&row.thinking.max!==undefined&&row.thinking.min>row.thinking.max)throw failure('catalog_model_thinking_invalid');
+        for(const key of ['zero_allowed','dynamic_allowed'])if(row.thinking[key]!==undefined&&typeof row.thinking[key]!=='boolean')throw failure('catalog_model_thinking_invalid');
+        const levels=row.thinking.levels;
+        if(levels!==undefined&&(!Array.isArray(levels)||levels.length>16||levels.some(level=>typeof level!=='string'||!/^[a-z][a-z0-9_-]{0,31}$/.test(level))||new Set(levels).size!==levels.length))throw failure('catalog_model_thinking_invalid');
+      }
     }
   }
-  const textModels=parsed.antigravity.filter(row=>/^gemini-/i.test(row.id)&&row.supportedInputModalities?.includes('text')&&row.supportedOutputModalities?.includes('text')&&row.supportedOutputModalities.every(x=>x==='text')&&Number.isSafeInteger(row.context_length)&&Number.isSafeInteger(row.max_completion_tokens)&&row.max_completion_tokens<=row.context_length);
-  if(!textModels.length)throw failure('gemini_text_catalog_empty');
+  const textModels=parsed.antigravity.filter(row=>/^(?:gemini|claude)-/i.test(row.id)&&row.supportedInputModalities?.includes('text')&&row.supportedOutputModalities?.includes('text')&&row.supportedOutputModalities.every(x=>x==='text')&&Number.isSafeInteger(row.context_length)&&Number.isSafeInteger(row.max_completion_tokens)&&row.max_completion_tokens<=row.context_length);
+  if(!textModels.length)throw failure('antigravity_text_catalog_empty');
   return {data,hash:digest(data),modelCount:parsed.antigravity.length,textModelCount:textModels.length};
 }
 function defaultRequest(url,{method='GET',headers={},body,signal,timeoutMs=15000,maxBytes=DEFAULT_MAX_BYTES}={}){

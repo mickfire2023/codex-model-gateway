@@ -21,7 +21,7 @@ async function enable(bridgeRoot,gatewayRoot){
   if(initial){
     const report=JSON.parse(fs.readFileSync(path.join(bridgeRoot,'validation.json'),'utf8'));
     if(report.provider?.opaqueReasoningIdentity!==current.identity)throw new Error('The initial validation belongs to a different account.');
-    const passed=new Set(report.models.filter(m=>m.toolCall&&m.toolResult&&m.customToolWrapper&&m.signatureContinuation).map(m=>m.id));
+    const passed=new Set(report.models.filter(m=>m.toolCall&&m.toolResult&&m.customToolWrapper&&(m.signatureContinuation||(/^claude-/.test(m.id)&&m.toolContinuation===true&&m.signatureCarrier===false&&m.reasoningAbsent===true))).map(m=>m.id));
     const proofModels=new Map((report.provider.models||[]).map(model=>[model.id,model]));
     for(const model of snapshot.provider.models)if(passed.has(model.id)&&model.preserveOpaqueReasoning&&(!proofModels.has(model.id)||fingerprint(model)!==fingerprint(proofModels.get(model.id))))throw new Error('Model capabilities changed after the initial validation; validate them again before setup.');
     managed=snapshot.provider.models.filter(m=>passed.has(m.id)&&m.preserveOpaqueReasoning).map(m=>m.id);
