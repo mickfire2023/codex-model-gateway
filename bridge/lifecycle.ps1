@@ -48,8 +48,10 @@ function Get-GeminiBridgeIdentity([string]$Directory) {
         Sid = $sid
         Name = 'CodexGeminiBridge-Service-' + $hash
         Marker = 'CodexGeminiBridge managed task v1|' + $root.ToLowerInvariant()
-        Executable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $root 'runner.ps1') + '" -Directory "' + $root + '"'
+        Executable = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        Arguments = '//B //NoLogo "' + (Join-Path $root 'task-launcher.vbs') + '" service'
+        LegacyExecutable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        LegacyArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $root 'runner.ps1') + '" -Directory "' + $root + '"'
         Binary = Join-Path $root 'cli-proxy-api.exe'
         BinaryArguments = '-config "' + (Join-Path $root 'config.yaml') + '" -local-model'
     }
@@ -74,12 +76,76 @@ function Assert-GeminiBridgeTaskOwned($Definition, $Identity) {
         [int]$Definition.Principal.LogonType -ne 3 -or [int]$Definition.Principal.RunLevel -ne 0 -or
         [int]$Definition.Actions.Count -ne 1) { throw 'The bridge task belongs to another configuration; it was left untouched.' }
     $action = $Definition.Actions.Item(1)
+    $current = [string]::Equals([string]$action.Path,$Identity.Executable,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals([string]$action.Arguments,$Identity.Arguments,[StringComparison]::Ordinal)
+    $legacy = [string]::Equals([string]$action.Path,$Identity.LegacyExecutable,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals([string]$action.Arguments,$Identity.LegacyArguments,[StringComparison]::Ordinal)
     if ([int]$action.Type -ne 0 -or
-        -not [string]::Equals([string]$action.Path,$Identity.Executable,[StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals([string]$action.Arguments,$Identity.Arguments,[StringComparison]::Ordinal) -or
+        -not ($current -or $legacy) -or
         -not [string]::Equals([string]$action.WorkingDirectory,$Identity.Root,[StringComparison]::OrdinalIgnoreCase)) {
         throw 'The bridge task target changed; it was left untouched.'
     }
+}
+function Test-GeminiBridgeTaskUsesLegacyLauncher($Definition, $Identity) {
+    Assert-GeminiBridgeTaskOwned $Definition $Identity
+    return [string]::Equals([string]$Definition.Actions.Item(1).Path,$Identity.LegacyExecutable,[StringComparison]::OrdinalIgnoreCase)
+}
+function Get-GeminiBridgeLauncherParent([string]$Directory) {
+    $identity = Get-GeminiBridgeIdentity $Directory
+    $task = Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
+    $requiresGui = -not $task -or -not (Test-GeminiBridgeTaskUsesLegacyLauncher $task.Definition $identity)
+    $self = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $PID) -ErrorAction Stop
+    $parent = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$self.ParentProcessId) -ErrorAction SilentlyContinue
+    $arguments = [regex]::Replace([string]$parent.CommandLine,'^(?:"[^"]+"|\S+)\s+','')
+    if ($parent -and [string]::Equals([string]$parent.ExecutablePath,$identity.Executable,[StringComparison]::OrdinalIgnoreCase) -and [string]::Equals($arguments,$identity.Arguments,[StringComparison]::OrdinalIgnoreCase)) {
+        $process = $null
+        try {
+            $process = [Diagnostics.Process]::GetProcessById([int]$parent.ProcessId)
+            $null = $process.Handle
+            $fresh = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$parent.ProcessId) -ErrorAction SilentlyContinue
+            if (-not $fresh -or $fresh.CreationDate -ne $parent.CreationDate -or $process.HasExited) { throw 'The managed GUI launcher has exited.' }
+            return $process
+        } catch { if ($process) { $process.Dispose() }; throw }
+    }
+    if ($requiresGui) { throw 'The managed GUI launcher is unavailable; the runner will not continue detached.' }
+    return $null
+}
+function Get-GeminiBridgeTaskSnapshot([string]$Directory) {
+    $identity = Get-GeminiBridgeIdentity $Directory
+    $task = Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
+    return [pscustomobject]@{ Name=$identity.Name;Sid=$identity.Sid;Exists=[bool]$task;Enabled=$(if($task){[bool]$task.Enabled}else{$false});Xml=$(if($task){[string]$task.Xml}else{$null}) }
+}
+function Restore-GeminiBridgeTaskSnapshot([string]$Directory, $Snapshot) {
+    $identity = Get-GeminiBridgeIdentity $Directory
+    if (-not $Snapshot -or $Snapshot.Name -cne $identity.Name -or $Snapshot.Sid -cne $identity.Sid) { throw 'The bridge task snapshot belongs to another installation or account.' }
+    $connection = Get-GeminiBridgeScheduler
+    $current = Find-GeminiBridgeTask $connection $identity
+    if (Test-GeminiBridgeTaskActive $current) { throw 'Stop the owned bridge task before restoring its definition.' }
+    if (-not $Snapshot.Exists) {
+        if ($current) { $connection.Folder.DeleteTask($identity.Name,0) }
+        return
+    }
+    $definition = $connection.Service.NewTask(0)
+    $definition.XmlText = [string]$Snapshot.Xml
+    Assert-GeminiBridgeTaskOwned $definition $identity
+    if ([bool]$definition.Settings.Enabled -ne [bool]$Snapshot.Enabled) { throw 'The bridge task snapshot enabled state is inconsistent.' }
+    return $connection.Folder.RegisterTaskDefinition($identity.Name,$definition,6,$identity.Sid,$null,3,$null)
+}
+function Update-GeminiBridgeTaskLauncher([string]$Directory) {
+    $identity = Get-GeminiBridgeIdentity $Directory
+    $connection = Get-GeminiBridgeScheduler
+    $task = Find-GeminiBridgeTask $connection $identity
+    if (-not $task) { throw 'The owned bridge task is missing; no task was recreated.' }
+    if (-not (Test-GeminiBridgeTaskUsesLegacyLauncher $task.Definition $identity)) { return $task }
+    if (Test-GeminiBridgeTaskActive $task) { throw 'Stop the owned bridge task before upgrading its launcher.' }
+    foreach ($file in @($identity.Executable,(Join-Path $identity.Root 'task-launcher.vbs'))) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'The windowless bridge task launcher is missing.' }
+    }
+    $definition = $task.Definition
+    $definition.Settings.Enabled = [bool]$task.Enabled
+    $action = $definition.Actions.Item(1)
+    $action.Path = $identity.Executable
+    $action.Arguments = $identity.Arguments
+    Assert-GeminiBridgeTaskOwned $definition $identity
+    return $connection.Folder.RegisterTaskDefinition($identity.Name,$definition,6,$identity.Sid,$null,3,$null)
 }
 
 function Find-GeminiBridgeTask($Connection, $Identity) {
@@ -95,12 +161,16 @@ function Test-GeminiBridgeTaskActive($Task) {
 
 function Register-GeminiBridgeTask([string]$Directory) {
     $identity = Get-GeminiBridgeIdentity $Directory
-    foreach ($file in @($identity.Executable,$identity.Binary,(Join-Path $identity.Root 'config.yaml'),(Join-Path $identity.Root 'runner.ps1'))) {
+    foreach ($file in @($identity.Executable,$identity.Binary,(Join-Path $identity.Root 'config.yaml'),(Join-Path $identity.Root 'runner.ps1'),(Join-Path $identity.Root 'task-launcher.vbs'))) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'The bridge executable or configuration is missing.' }
     }
     $connection = Get-GeminiBridgeScheduler
     $existing = Find-GeminiBridgeTask $connection $identity
     if (Test-GeminiBridgeTaskActive $existing) { return $existing }
+    if ($existing) {
+        if (Test-GeminiBridgeTaskUsesLegacyLauncher $existing.Definition $identity) { return Update-GeminiBridgeTaskLauncher $Directory }
+        return $existing
+    }
     $definition = $connection.Service.NewTask(0)
     $definition.RegistrationInfo.Description = $identity.Marker
     $definition.RegistrationInfo.Author = 'CodexGeminiBridge/' + $identity.Sid

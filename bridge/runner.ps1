@@ -9,6 +9,7 @@ if ($metadata.product -cne 'CodexGeminiBridge' -or [int]$metadata.port -lt 1024 
     throw 'The bridge metadata is invalid.'
 }
 $bridgePort=[int]$metadata.port
+$managedLauncher=Get-GeminiBridgeLauncherParent $identity.Root
 if (-not (Test-Path -LiteralPath $identity.Binary -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $identity.Root 'config.yaml') -PathType Leaf)) {
     throw 'The bridge executable or configuration is missing.'
 }
@@ -82,12 +83,14 @@ function Write-BridgeLifecycle($Record) {
 function Test-BridgeSupervisionEnabled {
     # Re-check ownership before every spawn. A deliberate disabled/missing task
     # is never re-enabled by this runner, including during recovery backoff.
+    if ($managedLauncher -and $managedLauncher.HasExited) { return $false }
     $task=Find-GeminiBridgeTask (Get-GeminiBridgeScheduler) $identity
     return [bool]($task -and $task.Enabled)
 }
 $restartCount=0L
 $failureStreak=0
 Write-BridgeLifecycle ([ordered]@{event='runner_started';restartCount=$restartCount})
+try {
 while (Test-BridgeSupervisionEnabled) {
     $existing=@(Get-GeminiBridgeListeners $bridgePort)
     if ($existing.Count -gt 0) {
@@ -127,7 +130,13 @@ while (Test-BridgeSupervisionEnabled) {
         Write-BridgeLifecycle ([ordered]@{event='child_started';pid=$process.Id;restartCount=$restartCount})
         $stdout=$process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
         $stderr=$process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-        $process.WaitForExit()
+        while (-not $process.WaitForExit(500)) {
+            if ($managedLauncher -and $managedLauncher.HasExited) {
+                $job.Dispose();$job=$null
+                $process.WaitForExit()
+                break
+            }
+        }
         $exitCode=$process.ExitCode
         $reason='child_exited'
         $job.Dispose();$job=$null
@@ -143,6 +152,10 @@ while (Test-BridgeSupervisionEnabled) {
         if ($job) { $job.Dispose() }
         if ($process) { $process.Dispose() }
     }
+    if ($managedLauncher -and $managedLauncher.HasExited) {
+        Write-BridgeLifecycle ([ordered]@{event='runner_stopped';reason='launcher_exited';restartCount=$restartCount})
+        return
+    }
     if ($clock.ElapsedMilliseconds -ge 60000) { $failureStreak=0 }
     $delay=[int][Math]::Min(30,[Math]::Pow(2,[Math]::Min(5,$failureStreak)))
     $failureStreak=[Math]::Min(6,$failureStreak+1)
@@ -153,6 +166,10 @@ while (Test-BridgeSupervisionEnabled) {
     # Intentional Stop disables the task before stopping this parent. All exits,
     # including code 0, otherwise receive bounded backoff instead of going idle.
     if (-not (Test-BridgeSupervisionEnabled)) { break }
-    Start-Sleep -Seconds $delay
+    for ($wait=0;$wait -lt $delay*2;$wait++) {
+        if ($managedLauncher -and $managedLauncher.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    }
 }
 Write-BridgeLifecycle ([ordered]@{event='runner_stopped';reason='task_disabled_or_missing';restartCount=$restartCount})
+} finally { if ($managedLauncher) { $managedLauncher.Dispose() } }
