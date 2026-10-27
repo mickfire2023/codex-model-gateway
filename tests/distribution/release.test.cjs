@@ -12,6 +12,13 @@ test('release audit rejects private data and executable runtime files',()=>{
   assert.equal(rejected.length,5);
   assert.deepEqual(inspect(['README.md','gateway/gateway.cjs']),[]);
 });
+
+test('release audit rejects source truncated to NUL bytes after an interrupted write',()=>{
+  const relative='tests/distribution/.nul-source-fixture-'+require('node:crypto').randomUUID()+'.txt';
+  const file=path.resolve(root,relative);assert.ok(file.startsWith(path.resolve(__dirname)+path.sep));
+  try{fs.writeFileSync(file,Buffer.alloc(32));assert.match(inspect([relative])[0],/NUL-corrupted/);}
+  finally{fs.unlinkSync(file);}
+});
 test('optional subscription setup requires an explicit opt-in and a pinned binary hash',()=>{
   const script=fs.readFileSync(path.join(root,'scripts/install-gemini.ps1'),'utf8');
   assert.match(script,/if \(-not \$AcceptThirdPartyTerms\)/);
