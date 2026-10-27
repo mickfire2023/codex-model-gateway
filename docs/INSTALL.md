@@ -29,6 +29,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
 
 不要直接把自己的 `private`、`runtime`、模型缓存或日志复制回源码仓库。更新源码也不会更新可选的 CLIProxyAPI 二进制。
 
+使用可选 Antigravity Claude 的已有安装，还需下载 2.6.0 的 `8.0.43-gateway.1` 兼容构建，并执行 `scripts/repair-gemini.ps1 -BinaryPath <解压后的EXE路径>`；完整命令与摘要见 [组件升级说明](GEMINI.md#启停与退出)。它保留现有授权、配置、密钥和停用状态，并为二进制、辅助脚本、安装元信息和任务恢复保留备份或快照；无需重新 OAuth、连接或初始化。原版 8.0.43 可继续使用 Gemini，Claude 路由则要求升级。
+
 ## 日常管理
 
 在安装目录运行以下脚本，省略 `-Directory` 时使用脚本所在目录，支持中文、空格路径以及从其他工作目录调用：
@@ -43,6 +45,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
 
 需要完全独立运行时，使用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "安装目录\脚本.ps1"`。常规情况下 Windows 登录时任务会自动启动服务；退出 Codex 不会终止它。
 
+2.6.0 使用 `wscript.exe` 承载主网关和组件的后台任务，并让主网关 Node 子进程不创建窗口，避免 Windows 11 默认 Terminal 在 PowerShell 隐藏自身前弹出窗口。升级只迁移精确属于本安装的旧任务动作，保留其他任务 XML 字段和启用/停用状态；失败时恢复原任务。
+
 ## 排错
 
 | 现象 | 处理 |
@@ -51,10 +55,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
 | 管理页提示 access denied | 使用桌面入口重新打开包含本机令牌的地址，不手输 `/settings/key` |
 | GPT 连接失败 | 先运行 `restore.ps1` 并重启 Codex，确认原生登录有效，再重新启用网关 |
 | 没有新模型 | 检查管理页的目录状态、账号权限、客户端版本和待支持原因；兼容性未确认的型号不会自动加入 |
+| Claude 提示组件需升级或返回相应 503 | 按组件文档提供兼容构建运行 `repair-gemini.ps1 -BinaryPath`，再升级主网关；不需要重新登录 |
 | 其他服务商保存失败 | 核对基础地址与 `GET /models` 支持；远程必须 HTTPS，禁止通过重定向转交密钥 |
 | 续聊提示历史缺失 | 网关内存历史可能已过期或重启，带摘要开启新聊天 |
 
 `gateway.log` 仅包含运行元信息，仍应检查后再分享。不要上传完整 `private`、Google OAuth JSON 或截图中的管理令牌。
+
+本次修复覆盖后台窗口、组件生命周期和模型协议兼容。它不代表已解决 Windows 蓝屏，也不能据此定位 Codex 首次启动退出的原因；本机服务健康通过仍需与下一次 Codex 冷启动结果分别核验。
 
 ## 恢复与卸载
 
