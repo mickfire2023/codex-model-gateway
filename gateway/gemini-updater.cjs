@@ -11,6 +11,7 @@ const PROVIDER='gemini-subscription';
 const ADAPTER='gemini-signed-responses-v1';
 const ID=/^(?:gemini|claude)-[A-Za-z0-9._/-]{1,190}$/;
 const GEMINI_EFFORTS=new Set(['minimal','low','medium','high']);
+const CLAUDE_BUDGET_MODELS=new Set(['claude-sonnet-5-5-high','claude-opus-5-5-high']);
 const clone=value=>structuredClone(value);
 const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail=(code,status=503)=>Object.assign(new Error(code),{code,status});
@@ -31,7 +32,14 @@ function abortable(action,signal){
 function displayName(id){return id.replace(/-high$/,'').replace(/(claude-(?:sonnet|opus))-(\d+)-(\d+)/,'$1-$2.$3').split('-').map((part,index)=>index===0?(part==='claude'?'Claude':'Gemini'):['flash','lite','pro','argon','sonnet','opus'].includes(part)?part[0].toUpperCase()+part.slice(1):part).join(' ');}
 function reasoningCapabilities(id,detail){
   const fallback=/-high$/.test(id)?'high':'none';
-  // Claude budget metadata proves transport support, not backend effort variability.
+  // Native Antigravity exposes these Claude models with low/medium/high. The
+  // pinned transport maps them to 1024/8192/24576 tokens, so require a declared
+  // budget range that can represent every choice before publishing the menu.
+  const thinking=detail?.thinking;
+  if(CLAUDE_BUDGET_MODELS.has(id)&&Number.isSafeInteger(thinking?.min)&&thinking.min>=0&&thinking.min<=1024&&Number.isSafeInteger(thinking?.max)&&thinking.max>=24576&&thinking.max<=100000000){
+    return {reasoningEfforts:['low','medium','high'],defaultReasoningEffort:'medium'};
+  }
+  // Unknown Claude models keep one conservative option until independently verified.
   if(!id.startsWith('gemini-'))return {reasoningEfforts:[fallback],defaultReasoningEffort:fallback};
   const levels=detail?.thinking?.levels;
   if(!Array.isArray(levels)||!levels.length||levels.length>GEMINI_EFFORTS.size||levels.some(level=>!GEMINI_EFFORTS.has(level))||new Set(levels).size!==levels.length)return {reasoningEfforts:[fallback],defaultReasoningEffort:fallback};
