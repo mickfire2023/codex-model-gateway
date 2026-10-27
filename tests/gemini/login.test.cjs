@@ -5,7 +5,11 @@ const fs=require('node:fs');
 const path=require('node:path');
 const http=require('node:http');
 const net=require('node:net');
-const {initialize}=require('../../bridge/initialize.cjs');
+const {initialize:initializeVerified}=require('../../bridge/initialize.cjs');
+const crypto=require('node:crypto');
+const fixtureManifest=structuredClone(require('../../bridge/binary-manifest.json'));
+fixtureManifest.official.sha256=crypto.createHash('sha256').update('synthetic fixture').digest('hex');
+const initialize=root=>initializeVerified(root,{binaryManifest:fixtureManifest});
 const {login,same}=require('../../bridge/login.cjs');
 const fixtures=path.resolve(__dirname,'fixtures');fs.mkdirSync(fixtures,{recursive:true});
 function fixture(){const root=fs.mkdtempSync(path.join(fixtures,'订阅 登录 '));fs.writeFileSync(path.join(root,'cli-proxy-api.exe'),'synthetic fixture');initialize(root);return root;}

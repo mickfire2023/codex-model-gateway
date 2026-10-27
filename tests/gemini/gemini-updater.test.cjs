@@ -5,11 +5,11 @@ const fs=require('node:fs');
 const path=require('node:path');
 const crypto=require('node:crypto');
 const {createProviderStore}=require('../../gateway/provider-store.cjs');
-const {createGeminiUpdater,discoverModels,fingerprint,protocolFingerprint,readCatalogs,account}=require('../../gateway/gemini-updater.cjs');
+const {createGeminiUpdater,discoverModels,fingerprint,protocolFingerprint,readCatalogs,account,readBridgeCapabilities}=require('../../gateway/gemini-updater.cjs');
 const IDENTITY='a'.repeat(64),OLD='gemini-existing-high',NEXT='gemini-next-high',OTHER='gemini-other-high',MANUAL='gemini-manual-high';
 const model=(id,extra={})=>({id,displayName:id,contextWindow:32768,maxOutputTokens:4096,inputModalities:['text'],supportsTools:true,reasoningEfforts:['high'],defaultReasoningEffort:'high',preserveOpaqueReasoning:true,...extra});
-function catalog(ids,{registered=ids,details={},thinking={}}={}){
-  return {available:{data:ids.map(id=>({id,owned_by:'antigravity'}))},native:{models:ids.map(id=>({name:'models/'+id,inputTokenLimit:32768,outputTokenLimit:4096,supportedInputModalities:['text'],supportedOutputModalities:['text'],...details[id]}))},registered:{models:registered.map(id=>({id}))},definitions:{channel:'antigravity',models:Object.entries(thinking).map(([id,value])=>({id,thinking:value}))}};
+function catalog(ids,{registered=ids,details={},thinking={},claudeSignatureReplay=true}={}){
+  return {available:{data:ids.map(id=>({id,owned_by:'antigravity'}))},native:{models:ids.map(id=>({name:'models/'+id,inputTokenLimit:32768,outputTokenLimit:4096,supportedInputModalities:['text'],supportedOutputModalities:['text'],...details[id]}))},registered:{models:registered.map(id=>({id}))},definitions:{channel:'antigravity',models:Object.entries(thinking).map(([id,value])=>({id,thinking:value}))},bridgeCapabilities:{claudeSignatureReplay}};
 }
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -125,7 +125,7 @@ test('readCatalogs reads capability definitions locally with management credenti
   fs.writeFileSync(path.join(root,'private/control.json'),JSON.stringify({managementKey}));
   fs.writeFileSync(path.join(root,'bridge.json'),JSON.stringify({product:'CodexGeminiBridge',port:8317}));
   const target={baseUrl:'http://127.0.0.1:8317/v1',accountIdentity:account(root).identity,headers:{authorization:'Bearer synthetic-model-key'}},calls=[];
-  const expected=catalog([OLD],{thinking:{[OLD]:{levels:['low','medium','high']}}});
+  const expected=catalog([OLD],{thinking:{[OLD]:{levels:['low','medium','high']}},claudeSignatureReplay:false});
   const requestJSON=async(url,options)=>{
     calls.push(url.pathname);assert.equal(url.origin,'http://127.0.0.1:8317');
     if(url.pathname.startsWith('/v8/management/'))assert.equal(options.headers.authorization,'Bearer '+managementKey);
@@ -137,6 +137,35 @@ test('readCatalogs reads capability definitions locally with management credenti
   };
   assert.deepEqual(await readCatalogs(root,target,{requestJSON}),expected);assert.equal(calls.length,4);
   await assert.rejects(readCatalogs(root,{...target,accountIdentity:'b'.repeat(64)},{requestJSON}),{code:'gemini_account_changed'});assert.equal(calls.length,4);
+});
+
+test('Claude stays pending on an old bridge while Gemini remains discoverable',()=>{
+  const claude='claude-sonnet-5-5-high',found=discoverModels(catalog([OLD,claude],{claudeSignatureReplay:false}));
+  assert.deepEqual(found.candidates.map(m=>m.id),[OLD]);
+  assert.equal(found.pending[0].id,claude);assert.match(found.pending[0].reason,/升级/);
+});
+
+test('Claude replay capability requires the exact patched executable digest, never a metadata claim',async t=>{
+  const f=await fixture(t),root=path.join(f.directory,'binary-support');fs.mkdirSync(root);
+  const binary=path.join(root,'cli-proxy-api.exe'),manifest=path.join(root,'binary-manifest.json');
+  const bytes=Buffer.from('Synthetic binary bytes; never executed.');fs.writeFileSync(binary,bytes);
+  const sha256=crypto.createHash('sha256').update(bytes).digest('hex');
+  assert.deepEqual(readBridgeCapabilities(root),{claudeSignatureReplay:false});
+  fs.writeFileSync(manifest,JSON.stringify({official:{sha256,claudeQ19:false}}));
+  assert.deepEqual(readBridgeCapabilities(root),{claudeSignatureReplay:false});
+  fs.writeFileSync(manifest,JSON.stringify({patched:{sha256,claudeQ19:true}}));
+  assert.deepEqual(readBridgeCapabilities(root),{claudeSignatureReplay:true});
+  fs.writeFileSync(binary,'Different synthetic binary bytes; never executed.');
+  assert.deepEqual(readBridgeCapabilities(root),{claudeSignatureReplay:false});
+});
+
+test('downgrading an installed bridge blocks Claude routes without affecting Gemini or native GPT',async t=>{
+  const f=await fixture(t);
+  assert.throws(()=>f.updater.assertRoute({providerId:'gemini-subscription',modelId:'claude-opus-5-5-high'}),error=>error.code==='antigravity_bridge_upgrade_required'&&error.status===503);
+  assert.doesNotThrow(()=>f.updater.assertRoute({providerId:'gemini-subscription',modelId:OLD}));
+  assert.doesNotThrow(()=>f.updater.assertRoute({provider:'openai'}));
+  f.settings.readBridgeCapabilities=()=>({claudeSignatureReplay:true});
+  assert.doesNotThrow(()=>f.updater.assertRoute({providerId:'gemini-subscription',modelId:'claude-opus-5-5-high'}));
 });
 
 test('Gemini declared levels become selectable with high and medium defaults, independently of ID spelling',()=>{
